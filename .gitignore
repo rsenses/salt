@@ -1,0 +1,11 @@
+/target/
+/.idea/
+/.vscode/
+/.DS_Store
+*.swp
+*.swo
+*~
+/.env
+/.env.*
+/salt.toml
+/oil.toml.example.pre-salt

@@ -1,0 +1,44 @@
+# Optional openers for the gx menu. Keep only applications installed on your system.
+[opener]
+finder = [
+  { command = ["open", "-a", "Finder", "{file}"], desc = "Finder", for = "macos" },
+]
+nvim = [
+  { command = ["nvim", "{file}"], desc = "Neovim", block = true },
+]
+vscode = [
+  { command = ["code", "{file}"], desc = "VS Code" },
+]
+textedit = [
+  { command = ["open", "-e", "{file}"], desc = "TextEdit", for = "macos" },
+]
+image-preview = [
+  { command = ["open", "-a", "Preview.app", "{file}"], desc = "Preview", for = "macos" },
+]
+image-optim = [
+  { command = ["open", "-a", "ImageOptim.app", "{file}"], desc = "ImageOptim", for = "macos" },
+]
+
+[[open.rules]]
+kind = "directory"
+use = ["finder", "nvim", "vscode"]
+
+[[open.rules]]
+mime = "image/*"
+use = ["image-preview", "image-optim"]
+
+[[open.rules]]
+glob = "*.{rs,md,txt,toml,json,yaml,yml,py,js,ts,tsx,jsx,sh}"
+use = ["nvim", "vscode", "textedit"]
+
+# Default: alphabetical, with directories before files.
+[sort]
+by = "name"
+directories_first = true
+
+# An exact directory rule. Newest entries first, including directories.
+[[sort.rules]]
+path = "~/Downloads"
+by = "mtime"
+reverse = true
+directories_first = false
