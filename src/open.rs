@@ -370,6 +370,11 @@ mod tests {
         let source = config.choices(Path::new("main.rs"));
         assert_eq!(source[0].desc, "Neovim");
         assert!(source[0].opener.block);
+        let csv = config.choices(Path::new("data.CSV"));
+        assert_eq!(
+            csv.iter().map(|c| c.desc.as_str()).collect::<Vec<_>>(),
+            ["Neovim", "VS Code"]
+        );
         assert!(config.choices(Path::new("unknown.bin")).is_empty());
     }
 }

@@ -59,13 +59,13 @@ The `[ui] icons` setting defaults to `true`. `--icons always`, `--icons never`, 
 
 Salt uses the terminal's default foreground and background. ANSI red (color 1) is the interface accent for the path, directories, cursor, and panels; ANSI green (color 2) is the background of search matches; ANSI yellow (color 3) highlights new entries briefly. The footer uses ANSI cyan (color 6) for the full mode name and row count. File size and scroll percentage invert the terminal's default foreground and background, while the selected filename uses ANSI magenta (color 5). The terminal theme supplies the actual colors. Salt has no separate color theme.
 
-The path at the top abbreviates the home directory as `~`. The active sort order appears in the footer beside the selected filename.
+The path display abbreviates the home directory as `~`. The active sort order appears in the information bar beside the selected filename. Set `[ui] footer_position = "top"` in `salt.toml` to move that bar above the path. The default is `"bottom"`; `R` applies a changed setting while Salt is open. Search input, commands, and notices stay at the bottom in either layout.
 
 ## Keys
 
 Press `?` in Salt for the full key reference, grouped into sections. In help, press `/` to filter keys and descriptions as you type; `Enter` or `Esc` leaves the search field, and `j`/`k` or the arrow keys browse the results. Press `Esc` again to close help. When you press the first key of a sequence (`g`, `d`, `c`, `y`, `r`, `x`, or `,`), a small panel in the bottom-right corner shows the available next keys. Visual selection modes (`v`, `V`, and `Ctrl+v`) show their available actions in the same corner while the selection is active. In `V`, press `g` to see `gc` for compressing the selected rows. Press `Space` to mark separate rows; the selection panel then shows the available actions and count. `Esc` cancels a sequence or selection. Single-key actions run immediately.
 
-Search input, `:` commands, and notices appear in a reversed-color bar directly above the footer. Dialogs share the same title, description, content, and action-footer layout. The key-hint panel keeps a fixed size and position in the bottom-right corner.
+Search input, `:` commands, and notices appear in a reversed-color bar at the bottom of the screen (directly above the information bar in the default layout). Dialogs share the same title, description, content, and action-footer layout. The key-hint panel keeps a fixed size and position in the bottom-right corner.
 
 ### Navigation and opening
 

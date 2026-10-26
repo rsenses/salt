@@ -1,6 +1,8 @@
 # Set false to hide Nerd Font icons. Defaults to true when omitted.
 [ui]
 icons = true
+# Put the information bar above the path. Use "bottom" for the default layout.
+footer_position = "bottom"
 
 # Optional openers for the gx menu. Keep only applications installed on your system.
 [opener]
@@ -34,6 +36,10 @@ use = ["image-preview", "image-optim"]
 [[open.rules]]
 glob = "*.{rs,md,txt,toml,json,yaml,yml,py,js,ts,tsx,jsx,sh}"
 use = ["nvim", "vscode", "textedit"]
+
+[[open.rules]]
+glob = "*.csv"
+use = ["nvim", "vscode"]
 
 # Default: alphabetical, with directories before files.
 [sort]

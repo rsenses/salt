@@ -10,7 +10,7 @@ mod ui;
 mod watch;
 mod zoxide;
 
-use config::AppConfig;
+use config::{AppConfig, FooterPosition};
 use crossterm::{
     cursor::Show,
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -156,10 +156,7 @@ fn reload_config_and_directory(
     edit: &mut Buffer,
     original: &mut Vec<Row>,
     entry_flash: &mut Option<EntryFlash>,
-    open_config: &mut OpenConfig,
-    icons: &mut bool,
-    icons_override: Option<Icons>,
-) -> io::Result<()> {
+) -> io::Result<(OpenConfig, bool, FooterPosition)> {
     let config = AppConfig::load()?;
     let column = edit.col;
     browser.select(edit.row);
@@ -173,9 +170,50 @@ fn reload_config_and_directory(
     edit.col = column.min(edit.selected().map_or(0, |row| row.name.chars().count()));
     *original = edit.rows.clone();
     *entry_flash = EntryFlash::new(newly_visible_rows(edit, &visible_before));
-    *open_config = config.open;
-    *icons = effective_icons(icons_override, config.icons);
-    Ok(())
+    Ok((config.open, config.icons, config.footer_position))
+}
+
+struct BrowserAreas {
+    path: Rect,
+    list: Rect,
+    alert: Rect,
+    footer: Rect,
+}
+
+fn browser_areas(area: Rect, footer_position: FooterPosition, has_alert: bool) -> BrowserAreas {
+    let alert_height = u16::from(has_alert);
+    let constraints = match footer_position {
+        FooterPosition::Top => [
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(alert_height),
+        ],
+        FooterPosition::Bottom => [
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(alert_height),
+            Constraint::Length(1),
+        ],
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+    match footer_position {
+        FooterPosition::Top => BrowserAreas {
+            footer: chunks[0],
+            path: chunks[1],
+            list: chunks[2],
+            alert: chunks[3],
+        },
+        FooterPosition::Bottom => BrowserAreas {
+            path: chunks[0],
+            list: chunks[1],
+            alert: chunks[2],
+            footer: chunks[3],
+        },
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -490,7 +528,7 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, browser: &Browser, 
         .constraints([
             Constraint::Length(left_width),
             Constraint::Min(0),
-            Constraint::Length(right_width),
+            Constraint::Length(right_width.min(area.width.saturating_sub(left_width))),
         ])
         .split(area);
     frame.render_widget(Paragraph::new(left), layout[0]);
@@ -750,6 +788,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     browser.set_sort_config(config.sort)?;
     let open_config = config.open;
     let icons = effective_icons(icons_override, config.icons);
+    let footer_position = config.footer_position;
     enable_raw_mode()?;
     let mut screen = ScreenGuard {
         alternate: false,
@@ -764,6 +803,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut browser,
         open_config,
         icons,
+        footer_position,
         icons_override,
     );
     drop(terminal);
@@ -818,6 +858,7 @@ fn run(
     browser: &mut Browser,
     mut open_config: OpenConfig,
     mut icons: bool,
+    mut footer_position: FooterPosition,
     icons_override: Option<Icons>,
 ) -> io::Result<()> {
     let mut edit = Buffer::from_browser(browser);
@@ -908,21 +949,13 @@ fn run(
             } else {
                 None
             };
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(1),
-                    Constraint::Min(1),
-                    Constraint::Length(u16::from(alert_text.is_some())),
-                    Constraint::Length(1),
-                ])
-                .split(frame.area());
+            let areas = browser_areas(frame.area(), footer_position, alert_text.is_some());
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     display_directory_path(browser.path(), home_dir.as_deref()),
                     accent_style(),
                 )),
-                chunks[0],
+                areas.path,
             );
             let highlighted_query = search
                 .as_ref()
@@ -980,11 +1013,11 @@ fn run(
             let list = List::new(rows);
             let mut state =
                 ListState::default().with_selected((!edit.rows.is_empty()).then_some(edit.row));
-            frame.render_stateful_widget(list, chunks[1], &mut state);
+            frame.render_stateful_widget(list, areas.list, &mut state);
             if let Some((label, message)) = &alert_text {
-                Alert { label, message }.render(frame, chunks[2]);
+                Alert { label, message }.render(frame, areas.alert);
             }
-            render_footer(frame, chunks[3], browser, &edit);
+            render_footer(frame, areas.footer, browser, &edit);
             if let Some((path, choices, selected)) = &menu {
                 let description = path.display().to_string();
                 let actions = [
@@ -1849,11 +1882,11 @@ fn run(
                         &mut edit,
                         &mut original,
                         &mut entry_flash,
-                        &mut open_config,
-                        &mut icons,
-                        icons_override,
                     ) {
-                        Ok(()) => {
+                        Ok((new_open_config, configured_icons, new_footer_position)) => {
+                            open_config = new_open_config;
+                            icons = effective_icons(icons_override, configured_icons);
+                            footer_position = new_footer_position;
                             if let Some(watcher) = directory_watcher.as_mut() {
                                 watcher.acknowledge();
                             }
@@ -2198,6 +2231,54 @@ mod search_tests {
         assert!(footer.contains("1/1"));
         assert!(rendered_row(&terminal, 4).contains("zoxide"));
         assert!(rendered_row(&terminal, 7).contains("zoxide"));
+    }
+
+    #[test]
+    fn information_bar_moves_without_moving_alerts() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("sample.txt"), "hello").unwrap();
+        let browser = Browser::new(root.path().to_path_buf()).unwrap();
+        let edit = Buffer::from_browser(&browser);
+        for width in [30, 80] {
+            for position in [FooterPosition::Top, FooterPosition::Bottom] {
+                let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        let areas = browser_areas(frame.area(), position, true);
+                        frame.render_widget(
+                            Paragraph::new("~/a/long/directory/path/that/does/not/fit"),
+                            areas.path,
+                        );
+                        frame.render_widget(Paragraph::new("sample.txt"), areas.list);
+                        Alert {
+                            label: "notice",
+                            message: "A long notification that extends past the terminal width",
+                        }
+                        .render(frame, areas.alert);
+                        render_footer(frame, areas.footer, &browser, &edit);
+                    })
+                    .unwrap();
+                let (footer_y, path_y, list_y, alert_y) = match position {
+                    FooterPosition::Top => (0, 1, 2, 7),
+                    FooterPosition::Bottom => (7, 0, 1, 6),
+                };
+                assert!(
+                    rendered_row(&terminal, footer_y).contains("NORMAL"),
+                    "width {width}, position {position:?}: {:?}",
+                    rendered_row(&terminal, footer_y)
+                );
+                assert!(rendered_row(&terminal, path_y).contains("~/a/long"));
+                assert!(rendered_row(&terminal, alert_y).contains("notice:"));
+                assert!(rendered_row(&terminal, list_y).contains("sample.txt"));
+            }
+        }
+        let area = Rect::new(0, 0, 80, 8);
+        let top = browser_areas(area, FooterPosition::Top, false);
+        assert_eq!(top.alert.height, 0);
+        assert_eq!(top.list.bottom(), area.bottom());
+        let bottom = browser_areas(area, FooterPosition::Bottom, false);
+        assert_eq!(bottom.alert.height, 0);
+        assert_eq!(bottom.list.bottom(), bottom.footer.y);
     }
 
     #[test]

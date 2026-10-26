@@ -6,6 +6,15 @@ pub struct AppConfig {
     pub open: OpenConfig,
     pub sort: SortConfig,
     pub icons: bool,
+    pub footer_position: FooterPosition,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FooterPosition {
+    Top,
+    #[default]
+    Bottom,
 }
 
 #[derive(Default, Deserialize)]
@@ -17,15 +26,19 @@ struct Root {
 struct UiConfig {
     #[serde(default = "icons_default")]
     icons: bool,
+    #[serde(default)]
+    footer_position: FooterPosition,
 }
 
 fn icons_default() -> bool {
     true
 }
 
-fn parse_icons_setting(source: &str) -> Result<bool, String> {
+fn parse_ui_settings(source: &str) -> Result<(bool, FooterPosition), String> {
     let root: Root = toml::from_str(source).map_err(|error| error.to_string())?;
-    Ok(root.ui.is_none_or(|ui| ui.icons))
+    Ok(root.ui.map_or((true, FooterPosition::Bottom), |ui| {
+        (ui.icons, ui.footer_position)
+    }))
 }
 
 impl AppConfig {
@@ -47,10 +60,12 @@ impl AppConfig {
                 format!("{}: {message}", path.display()),
             )
         };
+        let (icons, footer_position) = parse_ui_settings(&source).map_err(parse_error)?;
         Ok(Self {
             open: OpenConfig::parse(&source).map_err(parse_error)?,
             sort: SortConfig::parse(&source).map_err(parse_error)?,
-            icons: parse_icons_setting(&source).map_err(parse_error)?,
+            icons,
+            footer_position,
         })
     }
 }
@@ -74,14 +89,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn icons_are_enabled_unless_ui_disables_them() {
-        assert!(parse_icons_setting("").unwrap());
-        assert!(parse_icons_setting("[ui]\nicons = true").unwrap());
-        assert!(parse_icons_setting("[ui]\n").unwrap());
-        assert!(!parse_icons_setting("[ui]\nicons = false").unwrap());
-        assert!(parse_icons_setting("[ui]\nicons = 'never'").is_err());
+    fn ui_defaults_and_position_are_validated() {
+        assert_eq!(
+            parse_ui_settings("").unwrap(),
+            (true, FooterPosition::Bottom)
+        );
+        assert_eq!(
+            parse_ui_settings("[ui]\nicons = true").unwrap(),
+            (true, FooterPosition::Bottom)
+        );
+        assert_eq!(
+            parse_ui_settings("[ui]\nicons = false\nfooter_position = 'top'").unwrap(),
+            (false, FooterPosition::Top)
+        );
+        assert!(parse_ui_settings("[ui]\nicons = 'never'").is_err());
+        assert!(parse_ui_settings("[ui]\nfooter_position = 'left'").is_err());
         let example = include_str!("../salt.toml.example");
-        assert!(parse_icons_setting(example).unwrap());
+        assert_eq!(
+            parse_ui_settings(example).unwrap(),
+            (true, FooterPosition::Bottom)
+        );
         assert!(OpenConfig::parse(example).is_ok());
         assert!(SortConfig::parse(example).is_ok());
     }
