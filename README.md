@@ -22,6 +22,16 @@ Screenshots use Ghostty's Rose Pine and Rose Pine Dawn palettes. Salt itself use
 
 ## Install
 
+### Homebrew (macOS and Linux)
+
+```sh
+brew install rsenses/tap/salt-file-manager
+```
+
+The [Homebrew tap](https://github.com/rsenses/homebrew-tap) builds the tagged release from source and installs the `salt` command. Homebrew installs its Rust build dependency for you.
+
+### Build from source
+
 You need a recent stable Rust toolchain. Clone the repository and run:
 
 ```sh
@@ -31,7 +41,7 @@ install -m 755 target/release/salt "$HOME/.local/bin/salt"
 
 Make sure `~/.local/bin` is on your `PATH`, then start Salt in the current directory with `salt`. Pass a directory to start elsewhere: `salt ~/Downloads`. The path argument must be a directory.
 
-Run `salt --version` to check the installed version. Releases and installation options are tracked on the [GitHub releases page](https://github.com/rsenses/salt/releases). A Homebrew tap can be added after the first tagged release; the [release guide](docs/releasing.md) records the steps.
+Run `salt --version` to check the installed version. You can also download a prebuilt macOS or Linux archive from the [GitHub releases page](https://github.com/rsenses/salt/releases), verify it against `SHA256SUMS`, and put its `salt` binary on your `PATH`. The [release guide](docs/releasing.md) records the publication steps.
 
 ### Return to the last directory
 
