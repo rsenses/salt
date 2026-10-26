@@ -6,6 +6,7 @@ mod local_search;
 mod model;
 mod open;
 mod sort;
+mod watch;
 mod zoxide;
 
 use config::AppConfig;
@@ -34,6 +35,7 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
+use watch::DirectoryWatcher;
 
 // ANSI colors inherit their actual values from the terminal theme.
 const ACCENT: Color = Color::Red;
@@ -107,6 +109,51 @@ fn newly_visible_rows(edit: &Buffer, previous: &HashSet<PathBuf>) -> Vec<Row> {
         })
         .cloned()
         .collect()
+}
+
+fn reload_directory(
+    browser: &mut Browser,
+    edit: &mut Buffer,
+    original: &mut Vec<Row>,
+    entry_flash: &mut Option<EntryFlash>,
+) -> io::Result<()> {
+    let column = edit.col;
+    browser.select(edit.row);
+    let visible_before: HashSet<_> = browser
+        .entries()
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect();
+    browser.refresh()?;
+    edit.load(browser);
+    edit.col = column.min(edit.selected().map_or(0, |row| row.name.chars().count()));
+    *original = edit.rows.clone();
+    *entry_flash = EntryFlash::new(newly_visible_rows(edit, &visible_before));
+    Ok(())
+}
+
+fn reload_config_and_directory(
+    browser: &mut Browser,
+    edit: &mut Buffer,
+    original: &mut Vec<Row>,
+    entry_flash: &mut Option<EntryFlash>,
+    open_config: &mut OpenConfig,
+) -> io::Result<()> {
+    let config = AppConfig::load()?;
+    let column = edit.col;
+    browser.select(edit.row);
+    let visible_before: HashSet<_> = browser
+        .entries()
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect();
+    browser.set_sort_config(config.sort)?;
+    edit.load(browser);
+    edit.col = column.min(edit.selected().map_or(0, |row| row.name.chars().count()));
+    *original = edit.rows.clone();
+    *entry_flash = EntryFlash::new(newly_visible_rows(edit, &visible_before));
+    *open_config = config.open;
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -191,6 +238,7 @@ const HELP_LINES: &[&str] = &[
     "  n / N               next / previous search match",
     "  :noh                clear search highlighting",
     "  g.                  toggle hidden entries",
+    "  R                   reload config and current directory",
     "  ,a / ,A             sort name A–Z / Z–A",
     "  ,m / ,M             sort oldest / newest first",
     "  ,s / ,S             sort smallest / largest first",
@@ -352,7 +400,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     execute!(stdout, EnterAlternateScreen)?;
     screen.alternate = true;
     let mut terminal = Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
-    let result = run(&mut terminal, &mut browser, &open_config, icons);
+    let result = run(&mut terminal, &mut browser, open_config, icons);
     drop(terminal);
     let restore = screen.restore();
     result?;
@@ -403,7 +451,7 @@ impl Drop for ScreenGuard {
 fn run(
     terminal: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>,
     browser: &mut Browser,
-    open_config: &OpenConfig,
+    mut open_config: OpenConfig,
     icons: Icons,
 ) -> io::Result<()> {
     let mut edit = Buffer::from_browser(browser);
@@ -414,6 +462,13 @@ fn run(
     let mut archive_input: Option<(Vec<PathBuf>, String)> = None;
     let mut marked_g_pending = false;
     let mut status = String::new();
+    let mut directory_watcher = match DirectoryWatcher::new(browser.path()) {
+        Ok(watcher) => Some(watcher),
+        Err(error) => {
+            status = format!("Automatic refresh unavailable ({error}); press R to reload");
+            None
+        }
+    };
     let mut pending_plan: Option<Plan> = None;
     let mut plan_scroll = 0usize;
     let mut pending_delete: Option<PathBuf> = None;
@@ -426,6 +481,34 @@ fn run(
     let (launch_errors, pending_errors) = mpsc::channel::<String>();
     let mut menu: Option<(PathBuf, Vec<Choice>, usize)> = None;
     loop {
+        if let Some(watcher) = directory_watcher.as_mut() {
+            if let Err(error) = watcher.watch(browser.path()) {
+                status = format!("Automatic refresh unavailable ({error}); press R to reload");
+                directory_watcher = None;
+            } else {
+                watcher.collect();
+                let can_reload = !edit.dirty
+                    && edit.mode == Mode::Normal
+                    && edit.marked.is_empty()
+                    && edit.pending.is_none()
+                    && !marked_g_pending
+                    && command.is_none()
+                    && search.is_none()
+                    && archive_input.is_none()
+                    && pending_plan.is_none()
+                    && pending_delete.is_none()
+                    && menu.is_none()
+                    && !help_open;
+                if can_reload && watcher.ready() {
+                    if let Err(error) =
+                        reload_directory(browser, &mut edit, &mut original, &mut entry_flash)
+                    {
+                        status = format!("Could not refresh directory: {error}");
+                    }
+                    watcher.acknowledge();
+                }
+            }
+        }
         if entry_flash
             .as_ref()
             .is_some_and(|flash| flash.started.elapsed() >= EntryFlash::DURATION)
@@ -1182,6 +1265,29 @@ fn run(
             KeyCode::Char('p') => {
                 entry_flash = EntryFlash::new(edit.paste(browser));
             }
+            KeyCode::Char('R') => {
+                if edit.dirty {
+                    status = "Save or discard edits before reloading".into();
+                } else if !edit.marked.is_empty() {
+                    status = "Clear marks before reloading".into();
+                } else {
+                    match reload_config_and_directory(
+                        browser,
+                        &mut edit,
+                        &mut original,
+                        &mut entry_flash,
+                        &mut open_config,
+                    ) {
+                        Ok(()) => {
+                            if let Some(watcher) = directory_watcher.as_mut() {
+                                watcher.acknowledge();
+                            }
+                            status = "Configuration and directory reloaded".into();
+                        }
+                        Err(error) => status = format!("Could not refresh directory: {error}"),
+                    }
+                }
+            }
             KeyCode::Char('u') => edit.undo(),
             KeyCode::Char('q') => {
                 if edit.dirty {
@@ -1442,6 +1548,24 @@ fn with_terminal_suspended<T>(
 #[cfg(test)]
 mod search_tests {
     use super::*;
+    #[test]
+    fn external_reload_keeps_cursor_and_highlights_new_entry() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("alpha.txt"), "").unwrap();
+        fs::write(root.path().join("beta.txt"), "").unwrap();
+        let mut browser = Browser::new(root.path().to_path_buf()).unwrap();
+        let mut edit = Buffer::from_browser(&browser);
+        let mut original = edit.rows.clone();
+        edit.row = 1;
+        edit.col = 2;
+        fs::write(root.path().join("gamma.txt"), "").unwrap();
+        let mut flash = None;
+        reload_directory(&mut browser, &mut edit, &mut original, &mut flash).unwrap();
+        assert_eq!(edit.selected().unwrap().name, "beta.txt");
+        assert_eq!(edit.col, 2);
+        assert_eq!(flash.unwrap().rows[0].name, "gamma.txt");
+    }
+
     #[test]
     fn search_wraps_and_ignores_case() {
         let rows = ["alpha", "Beta", "gamma"].map(|name| edit::Row {

@@ -6,6 +6,8 @@ The name follows [vim-vinegar](https://github.com/tpope/vim-vinegar) and [oil.nv
 
 Salt currently targets macOS and Linux. It operates on local files only.
 
+Licensed under the [MIT License](LICENSE).
+
 ## Install
 
 You need a recent stable Rust toolchain. Clone the repository and run:
@@ -70,6 +72,7 @@ Press `?` in Salt for the full, scrollable key reference. When you press the fir
 | `L` or `Enter` | Enter a directory or open a file. |
 | `H`, `-`, or `Backspace` | Go to the parent directory. |
 | `g.` | Toggle hidden entries. |
+| `R` | Reload Salt's configuration and the current directory. Pending edits and marks are kept safe; clear or save them first. |
 | `/` | Search names in the current directory; matching text is highlighted as you type. Enter keeps the highlights; Esc restores the previous position. |
 | `n` / `N` | Jump to the next / previous search match, wrapping around the directory. |
 | `:noh` | Clear search highlighting. |
@@ -79,6 +82,8 @@ Press `?` in Salt for the full, scrollable key reference. When you press the fir
 | `,a` / `,A` | Sort by name A–Z / Z–A. |
 | `,m` / `,M` | Sort by modification time, oldest / newest first. |
 | `,s` / `,S` | Sort by size, smallest / largest first. |
+
+Salt watches the current directory for filesystem events on macOS and Linux and reloads after changes settle. It does not repeatedly scan the directory. Automatic reload waits while there are unsaved edits, marks, or an active prompt, so it cannot replace work in progress. Use `R` to reload both the configuration and directory, including when a filesystem does not deliver an event; `:e!` still discards edits and reloads the directory.
 
 Enter uses `$VISUAL`, then `$EDITOR`, for text and common source files. Salt waits until the editor exits. Other files use `open` on macOS or `xdg-open` on Linux. `gx` only offers applications matched by the opener configuration; with no matching rule, it does nothing.
 
@@ -125,7 +130,7 @@ The `:w` review lists every planned move, creation, copy, and deletion. Scroll i
 
 ## Configuration
 
-Copy [salt.toml.example](salt.toml.example) to `~/.config/salt/salt.toml` (or `$XDG_CONFIG_HOME/salt/salt.toml`) and edit it. Restart Salt after changing the file. A missing configuration is valid; a malformed file is reported at startup.
+Copy [salt.toml.example](salt.toml.example) to `~/.config/salt/salt.toml` (or `$XDG_CONFIG_HOME/salt/salt.toml`) and edit it. Press `R` after changing the file. A missing configuration is valid; a malformed file is reported at startup or on reload without replacing the working configuration.
 
 ```toml
 [opener]

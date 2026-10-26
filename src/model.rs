@@ -67,8 +67,14 @@ impl Browser {
             .unwrap_or_else(|| self.sort_config.for_path(&self.path))
     }
     pub fn set_sort_config(&mut self, config: SortConfig) -> io::Result<()> {
-        self.sort_config = config;
-        self.refresh()
+        let previous = std::mem::replace(&mut self.sort_config, config);
+        let previous_override = self.sort_override.take();
+        if let Err(error) = self.refresh() {
+            self.sort_config = previous;
+            self.sort_override = previous_override;
+            return Err(error);
+        }
+        Ok(())
     }
     pub fn set_sort(&mut self, spec: SortSpec) -> io::Result<()> {
         let previous = self.sort_override.replace(spec);
@@ -357,6 +363,24 @@ mod tests {
             browser.selected_path().unwrap().file_name().unwrap(),
             "alpha"
         );
+    }
+
+    #[test]
+    fn reloading_sort_config_replaces_manual_override() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("alpha"), "").unwrap();
+        fs::write(root.path().join("beta"), "").unwrap();
+        let mut browser = Browser::new(root.path().to_path_buf()).unwrap();
+        browser
+            .set_sort(SortSpec {
+                by: SortBy::Name,
+                reverse: true,
+                directories_first: true,
+            })
+            .unwrap();
+        assert_eq!(browser.entries()[0].name, "beta");
+        browser.set_sort_config(SortConfig::default()).unwrap();
+        assert_eq!(browser.entries()[0].name, "alpha");
     }
 
     #[test]

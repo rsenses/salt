@@ -3,6 +3,7 @@ name = "salt"
 version = "0.1.0"
 edition = "2024"
 description = "A local terminal file manager with an editable directory buffer"
+license = "MIT"
 readme = "README.md"
 publish = false
 
@@ -15,3 +16,4 @@ globset = "0.4"
 mime_guess = "2"
 shell-words = "1"
 tempfile = "3"
+notify = { version = "8.2", default-features = false, features = ["macos_kqueue"] }
