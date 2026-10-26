@@ -44,7 +44,7 @@ Optional tools:
 
 | Tool | Used for |
 | --- | --- |
-| Nerd Font | File and directory icons. Icons are on by default; use `--icons never` without one. |
+| Nerd Font | Distinct icons for common file types and familiar folders. Icons are on by default; use `--icons never` without one. Unknown files use a generic icon. |
 | `fzf` | Local recursive picker (`Z`) and zoxide picker (`z`). |
 | `zoxide` | Directory history for `z`. |
 | `zip` | Creating `.zip` archives with `gc`. |
@@ -57,7 +57,7 @@ Salt uses the terminal's default foreground and background. ANSI red (color 1) i
 
 ## Keys
 
-Press `?` in Salt for the full, scrollable key reference. When you press the first key of a sequence (`g`, `d`, `c`, `y`, `r`, `x`, or `,`), a small panel shows the available next keys. Visual selection modes (`v`, `V`, and `Ctrl+v`) show their available actions while the selection is active. In `V`, press `g` to see `gc` for compressing the selected rows. Press `Space` to mark separate rows; the selection panel then shows the available actions and count. `Esc` cancels a sequence or selection. Single-key actions run immediately.
+Press `?` in Salt for the full, scrollable key reference. When you press the first key of a sequence (`g`, `d`, `c`, `y`, `r`, `x`, or `,`), a small panel in the bottom-right corner shows the available next keys. Visual selection modes (`v`, `V`, and `Ctrl+v`) show their available actions in the same corner while the selection is active. In `V`, press `g` to see `gc` for compressing the selected rows. Press `Space` to mark separate rows; the selection panel then shows the available actions and count. `Esc` cancels a sequence or selection. Single-key actions run immediately.
 
 ### Navigation and opening
 
@@ -106,7 +106,7 @@ A new row ending in `/` creates a directory. A name such as `test/test1.txt` cre
 
 `gc` prompts for a `.zip` filename. It requires the `zip` program, creates the archive in the current directory, and refuses to overwrite an existing path. Multi-item archives can use contiguous `V` rows or separate Space marks.
 
-With Space marks, `d` or `x` removes all marked rows from the buffer, `y` copies them to Salt's register, and `gc` compresses them into one ZIP. Removal takes effect on disk only after `:w` and its deletion confirmation. `c` or `s` changes one marked row; changing several complete rows is not supported yet. `Esc` clears all marks. Marks are cleared when the buffer changes or the directory is reloaded, but are preserved when you change the sort order.
+With Space marks, `d` or `x` removes all marked rows from the buffer, `y` copies them to Salt's register, and `gc` compresses them into one ZIP. Marked names use the accent background; the selection panel shows the count. Removal takes effect on disk only after `:w` and its deletion confirmation. `c` or `s` changes one marked row; changing several complete rows is not supported yet. `Esc` clears all marks. Marks are cleared when the buffer changes or the directory is reloaded, but are preserved when you change the sort order.
 
 ### Saving and leaving
 
@@ -182,6 +182,6 @@ Salt is an evolving file manager, not a complete Neovim implementation. It has n
 - [oil.nvim](https://github.com/stevearc/oil.nvim) by stevearc, for the editable directory model.
 - [Neovim](https://neovim.io/), for the editing vocabulary.
 - [Yazi](https://github.com/sxyazi/yazi), for ideas around configurable openers and navigation.
-- [Superfile](https://github.com/yorukot/superfile), for file manager interaction ideas.
+- [Superfile](https://github.com/yorukot/superfile), for file manager interaction ideas and the [file icon mapping](https://github.com/yorukot/superfile/blob/main/src/config/icon/icon.go) that inspired Salt's Nerd Font glyphs. Salt uses terminal ANSI colors instead of Superfile's fixed icon colors.
 - [which-key.nvim](https://github.com/folke/which-key.nvim) by folke, for showing available keys during a sequence.
 - [fzf](https://github.com/junegunn/fzf) and [zoxide](https://github.com/ajeetdsouza/zoxide), which power Salt's jump pickers when installed.

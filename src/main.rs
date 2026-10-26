@@ -1,6 +1,7 @@
 mod archive;
 mod config;
 mod edit;
+mod icons;
 mod local_search;
 mod model;
 mod open;
@@ -123,17 +124,6 @@ fn parse_icons(value: &str) -> Result<Icons, String> {
         _ => Err(format!("Invalid icon mode: {value}")),
     }
 }
-fn icon(kind: EntryKind, enabled: bool) -> &'static str {
-    if !enabled {
-        return "";
-    }
-    match kind {
-        EntryKind::Directory => "\u{f07b} ",
-        EntryKind::File => "\u{f15b} ",
-        EntryKind::Symlink => "\u{f0c1} ",
-    }
-}
-
 const HELP_LINES: &[&str] = &[
     "NAVIGATION",
     "  j / k, ↑ / ↓       next / previous row",
@@ -398,16 +388,15 @@ fn run(
                 .or(last_search.as_deref()).unwrap_or("");
             let rows: Vec<_> = edit.rows.iter().enumerate().map(|(i, row)| {
                 let suffix = if row.kind == EntryKind::Directory && !row.name.ends_with('/') { "/" } else { "" };
-                let prefix = icon(row.kind, icons.enabled());
+                let prefix = icons::icon(&row.name, row.kind, icons.enabled());
                 let marked = edit.marked.contains(&i);
-                let marker = if marked { "[x] " } else { "    " };
                 let entry_style = if row.kind == EntryKind::Directory {
                     accent_style()
                 } else {
                     Style::default()
                 };
                 let mut spans = vec![
-                    Span::styled(marker, if marked { accent_style() } else { Style::default() }),
+                    Span::raw(" "),
                     Span::styled(prefix.to_string(), entry_style),
                 ];
                 let selection = edit.visual_range(i);
@@ -502,8 +491,8 @@ fn run(
                     let width = area.width.saturating_sub(2).min(48);
                     let height = (hints.len() as u16 + 2).min(area.height.saturating_sub(1));
                     if width >= 12 && height >= 3 {
-                        let x = if edit.pending.is_some() || marked_g_pending { area.x + 1 } else { area.right().saturating_sub(width + 1) };
-                        let popup = Rect::new(x, area.bottom().saturating_sub(height + 1), width, height);
+                        let popup = Rect::new(area.right().saturating_sub(width + 1),
+                            area.bottom().saturating_sub(height + 1), width, height);
                         let lines: Vec<Line<'_>> = hints.iter().map(|(key, action)| {
                             Line::from(vec![
                                 Span::styled(format!("  {key:<9}"), accent_style()),
