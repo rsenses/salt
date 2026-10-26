@@ -6,9 +6,12 @@ Salt uses `vMAJOR.MINOR.PATCH` Git tags. The first public release is `v0.1.0`, m
 
 1. Review `git status` and `git diff --check`. Confirm that every source, example, documentation, and workflow change is committed.
 2. On macOS and Linux, run `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked`, and `cargo build --release --locked`. Check `target/release/salt --version` and `target/release/salt --help`. The ZIP tests need `zip` on `PATH`.
-3. Review the README, example configuration, license, and planned release notes against the tagged code. Verify that the GitHub CI jobs pass for the release commit.
-4. Tag the committed release and push it: `git tag -a v0.1.0 -m 'Salt v0.1.0'`, then `git push origin main v0.1.0`.
-5. Create a GitHub release from `v0.1.0`. Summarize the major features, macOS/Linux support, installation, and current local-only scope. Source installation works from the tag without a binary attachment.
+3. Review the README, example configuration, license, and planned release notes. Push the release commit and verify that both GitHub CI jobs pass.
+4. Run the `Release` workflow manually on `main` to build and inspect its four downloadable artifacts. A manual run does not create a GitHub release.
+5. Tag the tested commit and push the tag: `git tag -a v0.1.0 -m 'Salt v0.1.0'`, then `git push origin v0.1.0`. The tag workflow checks the package version, runs formatting, lint and tests, builds Linux and macOS packages for x86-64 and ARM64, and creates a draft GitHub release with `SHA256SUMS`.
+6. Review the draft release notes, download an asset to check it, and publish the draft in GitHub. Mention the local-only scope and supported platforms. The Homebrew tap can be updated after publication.
+
+The Linux binaries are built on Ubuntu 24.04 and use GNU libc. Users on older or different Linux systems can build from source. Each archive contains `salt`, the README, the license, and the example configuration.
 
 Avoid moving a published tag. For a fix, increase the patch version in `Cargo.toml` and publish a new tag.
 
