@@ -8,6 +8,18 @@ Salt currently targets macOS and Linux. It operates on local files only.
 
 Licensed under the [MIT License](LICENSE).
 
+## Preview
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/salt-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/salt-light.png">
+  <img alt="Salt browsing a sample project with Nerd Font icons and its information bar" src="docs/screenshots/salt-light.png">
+</picture>
+
+[View dark screenshot](docs/screenshots/salt-dark.png) · [View light screenshot](docs/screenshots/salt-light.png)
+
+Screenshots use Ghostty's Rose Pine and Rose Pine Dawn palettes. Salt itself uses the terminal's colors.
+
 ## Install
 
 You need a recent stable Rust toolchain. Clone the repository and run:
