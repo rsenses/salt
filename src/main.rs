@@ -40,6 +40,7 @@ use watch::DirectoryWatcher;
 // ANSI colors inherit their actual values from the terminal theme.
 const ACCENT: Color = Color::Red;
 const SEARCH_HIGHLIGHT: Color = Color::Green;
+const NEW_ENTRY_HIGHLIGHT: Color = Color::Yellow;
 
 fn accent_style() -> Style {
     Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
@@ -56,6 +57,19 @@ fn search_background() -> Style {
     Style::default()
         .fg(Color::Black)
         .bg(SEARCH_HIGHLIGHT)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn new_entry_background() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(NEW_ENTRY_HIGHLIGHT)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn new_entry_foreground() -> Style {
+    Style::default()
+        .fg(NEW_ENTRY_HIGHLIGHT)
         .add_modifier(Modifier::BOLD)
 }
 
@@ -92,9 +106,9 @@ impl EntryFlash {
             return None;
         }
         if self.started.elapsed() < Duration::from_millis(350) {
-            Some(accent_background())
+            Some(new_entry_background())
         } else {
-            Some(accent_style())
+            Some(new_entry_foreground())
         }
     }
 }
@@ -546,10 +560,10 @@ fn run(
                 let flash_style = entry_flash.as_ref().and_then(|flash| flash.style(row));
                 for (col, ch) in row.name.chars().enumerate() {
                     let selected = selection.is_some_and(|(start, end)| col >= start && col < end);
-                    let style = if i == edit.row && col == edit.col {
-                        accent_background()
-                    } else if let Some(style) = flash_style {
+                    let style = if let Some(style) = flash_style {
                         style
+                    } else if i == edit.row && col == edit.col {
+                        accent_background()
                     } else if matches.get(col).copied().unwrap_or(false) {
                         search_background()
                     } else if selected || marked {

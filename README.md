@@ -21,7 +21,7 @@ Make sure `~/.local/bin` is on your `PATH`, then start Salt in the current direc
 
 ### Return to the last directory
 
-A program cannot change its parent shell's working directory. To make `salt` leave your zsh shell in the last directory you visited, add this function to `~/.zshrc`:
+A program cannot change its parent shell's working directory. The `salt` shell function runs the binary with `--cwd-file`, reads the final directory written by Salt, and then runs `cd` in the calling shell. Add this function to `~/.zshrc` (or a functions file sourced by it):
 
 ```zsh
 salt() {
@@ -40,7 +40,7 @@ salt() {
 }
 ```
 
-Restart the shell or source `~/.zshrc`. The `--cwd-file` option writes a NUL-terminated final directory only after Salt exits successfully; the wrapper reads it and changes the shell directory. Calling the binary without the function leaves the shell directory unchanged.
+Restart the shell or source the file containing the function in your current session. Check with `type salt`: it must report a shell function. The `--cwd-file` option writes a NUL-terminated final directory only after Salt exits successfully; the wrapper reads it and changes the shell directory. Running the binary directly leaves the calling shell directory unchanged.
 
 Optional tools:
 
@@ -55,7 +55,7 @@ Optional tools:
 
 For `--icons auto`, set `SALT_NERD_FONT=1` to enable icons. Font detection is not reliable in a terminal, so auto mode uses that explicit hint.
 
-Salt uses the terminal's default foreground and background. ANSI red (color 1) is the interface accent for the path, directories, cursor, and panels; ANSI green (color 2) is the background of search matches. The terminal theme supplies the actual colors. For example, Ghostty's Rose Pine Dawn maps them to `#b4637a` and `#286983`. Salt has no separate color theme.
+Salt uses the terminal's default foreground and background. ANSI red (color 1) is the interface accent for the path, directories, cursor, and panels; ANSI green (color 2) is the background of search matches; ANSI yellow (color 3) highlights new entries briefly. The terminal theme supplies the actual colors. Salt has no separate color theme.
 
 ## Keys
 
@@ -109,7 +109,7 @@ Press `,` to see the sorting choices. Manual sorting applies to the current dire
 
 A new row ending in `/` creates a directory. A name such as `test/test1.txt` creates missing parent directories when saved. A relative name such as `../other/name` moves an entry to another local directory. Save or discard pending edits before navigating, deleting, or compressing.
 
-New entries briefly glow with the terminal accent color after pasting, finishing a new buffer row, saving newly created files or directories, or creating a ZIP. The highlight then returns to the normal row colors.
+New entries briefly glow with ANSI yellow (color 3) after pasting, finishing a new buffer row, saving newly created files or directories, or creating a ZIP. The highlight then returns to the normal row colors.
 
 `gc` prompts for a `.zip` filename. It requires the `zip` program, creates the archive in the current directory, and refuses to overwrite an existing path. Multi-item archives can use contiguous `V` rows or separate Space marks.
 
