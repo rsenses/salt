@@ -20,7 +20,7 @@ use open::{Choice, OpenConfig};
 use ratatui::{
     Terminal,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
@@ -33,6 +33,28 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
+
+// ANSI colors inherit their actual values from the terminal theme.
+const ACCENT: Color = Color::Red;
+const SEARCH_HIGHLIGHT: Color = Color::Green;
+
+fn accent_style() -> Style {
+    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+}
+
+fn accent_background() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(ACCENT)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn search_background() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(SEARCH_HIGHLIGHT)
+        .add_modifier(Modifier::BOLD)
+}
 
 #[derive(Clone, Copy)]
 enum Icons {
@@ -368,8 +390,10 @@ fn run(
             let chunks = Layout::default().direction(Direction::Vertical)
                 .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
                 .split(frame.area());
-            frame.render_widget(Paragraph::new(format!("{} · {}", browser.path().display(), browser.sort().label()))
-                .style(Style::default().add_modifier(Modifier::BOLD)), chunks[0]);
+            frame.render_widget(Paragraph::new(Line::from(vec![
+                Span::styled(browser.path().display().to_string(), accent_style()),
+                Span::raw(format!(" · {}", browser.sort().label())),
+            ])), chunks[0]);
             let highlighted_query = search.as_ref().map(|(query, _, _)| query.as_str())
                 .or(last_search.as_deref()).unwrap_or("");
             let rows: Vec<_> = edit.rows.iter().enumerate().map(|(i, row)| {
@@ -377,25 +401,34 @@ fn run(
                 let prefix = icon(row.kind, icons.enabled());
                 let marked = edit.marked.contains(&i);
                 let marker = if marked { "[x] " } else { "    " };
-                let mut spans = vec![Span::raw(marker), Span::raw(prefix.to_string())];
+                let entry_style = if row.kind == EntryKind::Directory {
+                    accent_style()
+                } else {
+                    Style::default()
+                };
+                let mut spans = vec![
+                    Span::styled(marker, if marked { accent_style() } else { Style::default() }),
+                    Span::styled(prefix.to_string(), entry_style),
+                ];
                 let selection = edit.visual_range(i);
                 let matches = matching_columns(&row.name, highlighted_query);
                 for (col, ch) in row.name.chars().enumerate() {
                     let selected = selection.is_some_and(|(start, end)| col >= start && col < end);
-                    let mut style = if i == edit.row && col == edit.col {
-                        Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                    let style = if i == edit.row && col == edit.col {
+                        accent_background()
+                    } else if matches.get(col).copied().unwrap_or(false) {
+                        search_background()
                     } else if selected || marked {
-                        Style::default().add_modifier(Modifier::REVERSED)
-                    } else { Style::default() };
-                    if matches.get(col).copied().unwrap_or(false) {
-                        style = style.add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
-                    }
+                        accent_background()
+                    } else {
+                        entry_style
+                    };
                     spans.push(Span::styled(ch.to_string(), style));
                 }
                 if i == edit.row && edit.col >= row.name.chars().count() {
-                    spans.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)));
+                    spans.push(Span::styled(" ", accent_background()));
                 }
-                spans.push(Span::raw(suffix.to_string()));
+                spans.push(Span::styled(suffix.to_string(), entry_style));
                 let line = Line::from(spans);
                 ListItem::new(line)
             }).collect();
@@ -433,8 +466,9 @@ fn run(
                 frame.render_widget(Clear, popup);
                 let title = format!("Open with: {}", path.file_name().unwrap_or_default().to_string_lossy());
                 let rows: Vec<_> = choices.iter().map(|choice| ListItem::new(choice.desc.as_str())).collect();
-                let list = List::new(rows).block(Block::default().title(title).borders(Borders::ALL))
-                    .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+                let list = List::new(rows).block(Block::default().title(title).borders(Borders::ALL)
+                    .border_style(accent_style()))
+                    .highlight_style(accent_background());
                 let mut state = ListState::default().with_selected(Some(*selected));
                 frame.render_stateful_widget(list, popup, &mut state);
             }
@@ -471,12 +505,15 @@ fn run(
                         let x = if edit.pending.is_some() || marked_g_pending { area.x + 1 } else { area.right().saturating_sub(width + 1) };
                         let popup = Rect::new(x, area.bottom().saturating_sub(height + 1), width, height);
                         let lines: Vec<Line<'_>> = hints.iter().map(|(key, action)| {
-                            Line::from(format!("  {key:<9} {action}"))
+                            Line::from(vec![
+                                Span::styled(format!("  {key:<9}"), accent_style()),
+                                Span::raw(format!(" {action}")),
+                            ])
                         }).collect();
                         frame.render_widget(Clear, popup);
                         frame.render_widget(Paragraph::new(lines)
                             .block(Block::default().title(title)
-                                .borders(Borders::ALL)), popup);
+                                .borders(Borders::ALL).border_style(accent_style())), popup);
                     }
             }
             if let Some(plan) = &pending_plan {
@@ -495,7 +532,7 @@ fn run(
                     frame.render_widget(Clear, popup);
                     frame.render_widget(Paragraph::new(lines)
                         .block(Block::default().title(format!("Review :w · {}/{}", plan_scroll.saturating_add(1).min(details.len()), details.len()))
-                            .borders(Borders::ALL)), popup);
+                            .borders(Borders::ALL).border_style(accent_style())), popup);
                 }
             }
             if let Some(path) = &pending_delete {
@@ -504,7 +541,8 @@ fn run(
                     area.width * 2 / 3, 5.min(area.height));
                 frame.render_widget(Clear, popup);
                 frame.render_widget(Paragraph::new(format!("Delete {} permanently?\nDirectories and their contents will be removed.\ny = delete · n/Esc = cancel", path.display()))
-                    .block(Block::default().title("Confirm deletion").borders(Borders::ALL)), popup);
+                    .block(Block::default().title("Confirm deletion").borders(Borders::ALL)
+                        .border_style(accent_style())), popup);
             }
             if let Some((paths, name)) = &archive_input {
                 let area = frame.area();
@@ -514,7 +552,8 @@ fn run(
                         area.y + area.height.saturating_sub(5) / 2, width, 5);
                     frame.render_widget(Clear, popup);
                     frame.render_widget(Paragraph::new(format!("{} item(s) → {}\nEnter = create · Esc = cancel", paths.len(), name))
-                        .block(Block::default().title("Create ZIP archive").borders(Borders::ALL)), popup);
+                        .block(Block::default().title("Create ZIP archive").borders(Borders::ALL)
+                            .border_style(accent_style())), popup);
                 }
             }
             if help_open {
@@ -528,7 +567,8 @@ fn run(
                     .map(|line| Line::raw(*line)).collect();
                 frame.render_widget(Clear, popup);
                 frame.render_widget(Paragraph::new(lines)
-                    .block(Block::default().title(format!("Salt help · {}/{}", help_scroll + 1, HELP_LINES.len())).borders(Borders::ALL)), popup);
+                    .block(Block::default().title(format!("Salt help · {}/{}", help_scroll + 1, HELP_LINES.len()))
+                        .borders(Borders::ALL).border_style(accent_style())), popup);
             }
         })?;
         let key = if let Some(key) = queued_key.take() {

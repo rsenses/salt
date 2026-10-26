@@ -53,6 +53,8 @@ Optional tools:
 
 For `--icons auto`, set `SALT_NERD_FONT=1` to enable icons. Font detection is not reliable in a terminal, so auto mode uses that explicit hint.
 
+Salt uses the terminal's default foreground and background. ANSI red (color 1) is the interface accent for the path, directories, cursor, and panels; ANSI green (color 2) is the background of search matches. The terminal theme supplies the actual colors. For example, Ghostty's Rose Pine Dawn maps them to `#b4637a` and `#286983`. Salt has no separate color theme.
+
 ## Keys
 
 Press `?` in Salt for the full, scrollable key reference. When you press the first key of a sequence (`g`, `d`, `c`, `y`, `r`, `x`, or `,`), a small panel shows the available next keys. Visual selection modes (`v`, `V`, and `Ctrl+v`) show their available actions while the selection is active. In `V`, press `g` to see `gc` for compressing the selected rows. Press `Space` to mark separate rows; the selection panel then shows the available actions and count. `Esc` cancels a sequence or selection. Single-key actions run immediately.
