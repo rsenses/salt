@@ -19,6 +19,8 @@ install -m 755 target/release/salt "$HOME/.local/bin/salt"
 
 Make sure `~/.local/bin` is on your `PATH`, then start Salt in the current directory with `salt`. Pass a directory to start elsewhere: `salt ~/Downloads`. The path argument must be a directory.
 
+Run `salt --version` to check the installed version. Releases and installation options are tracked on the [GitHub releases page](https://github.com/rsenses/salt/releases). A Homebrew tap can be added after the first tagged release; the [release guide](docs/releasing.md) records the steps.
+
 ### Return to the last directory
 
 A program cannot change its parent shell's working directory. The `salt` shell function runs the binary with `--cwd-file`, reads the final directory written by Salt, and then runs `cd` in the calling shell. Add this function to `~/.zshrc` (or a functions file sourced by it):
@@ -46,20 +48,24 @@ Optional tools:
 
 | Tool | Used for |
 | --- | --- |
-| Nerd Font | Distinct icons for common file types and familiar folders. Icons are on by default; use `--icons never` without one. Unknown files use a generic icon. |
+| Nerd Font | Distinct icons for common file types and familiar folders. Icons are on by default; set `[ui] icons = false` in `salt.toml` or use `--icons never` to hide them. Unknown files use a generic icon. |
 | `fzf` | Local recursive picker (`Z`) and zoxide picker (`z`). |
 | `zoxide` | Directory history for `z`. |
 | `zip` | Creating `.zip` archives with `gc`. |
 | `$VISUAL` or `$EDITOR` | Opening text and source files with Enter. |
 | `xdg-open` on Linux | Opening other files with the system default application. macOS uses `open`. |
 
-For `--icons auto`, set `SALT_NERD_FONT=1` to enable icons. Font detection is not reliable in a terminal, so auto mode uses that explicit hint.
+The `[ui] icons` setting defaults to `true`. `--icons always`, `--icons never`, and `--icons auto` override it for one run; `R` reloads the TOML setting while Salt is open. For `--icons auto`, set `SALT_NERD_FONT=1` to enable icons. Font detection is not reliable in a terminal, so auto mode uses that explicit hint.
 
-Salt uses the terminal's default foreground and background. ANSI red (color 1) is the interface accent for the path, directories, cursor, and panels; ANSI green (color 2) is the background of search matches; ANSI yellow (color 3) highlights new entries briefly. The terminal theme supplies the actual colors. Salt has no separate color theme.
+Salt uses the terminal's default foreground and background. ANSI red (color 1) is the interface accent for the path, directories, cursor, and panels; ANSI green (color 2) is the background of search matches; ANSI yellow (color 3) highlights new entries briefly. The footer uses ANSI cyan (color 6) for the full mode name and row count. File size and scroll percentage invert the terminal's default foreground and background, while the selected filename uses ANSI magenta (color 5). The terminal theme supplies the actual colors. Salt has no separate color theme.
+
+The path at the top abbreviates the home directory as `~`. The active sort order appears in the footer beside the selected filename.
 
 ## Keys
 
-Press `?` in Salt for the full, scrollable key reference. When you press the first key of a sequence (`g`, `d`, `c`, `y`, `r`, `x`, or `,`), a small panel in the bottom-right corner shows the available next keys. Visual selection modes (`v`, `V`, and `Ctrl+v`) show their available actions in the same corner while the selection is active. In `V`, press `g` to see `gc` for compressing the selected rows. Press `Space` to mark separate rows; the selection panel then shows the available actions and count. `Esc` cancels a sequence or selection. Single-key actions run immediately.
+Press `?` in Salt for the full key reference, grouped into sections. In help, press `/` to filter keys and descriptions as you type; `Enter` or `Esc` leaves the search field, and `j`/`k` or the arrow keys browse the results. Press `Esc` again to close help. When you press the first key of a sequence (`g`, `d`, `c`, `y`, `r`, `x`, or `,`), a small panel in the bottom-right corner shows the available next keys. Visual selection modes (`v`, `V`, and `Ctrl+v`) show their available actions in the same corner while the selection is active. In `V`, press `g` to see `gc` for compressing the selected rows. Press `Space` to mark separate rows; the selection panel then shows the available actions and count. `Esc` cancels a sequence or selection. Single-key actions run immediately.
+
+Search input, `:` commands, and notices appear in a reversed-color bar directly above the footer. Dialogs share the same title, description, content, and action-footer layout. The key-hint panel keeps a fixed size and position in the bottom-right corner.
 
 ### Navigation and opening
 
@@ -113,20 +119,20 @@ New entries briefly glow with ANSI yellow (color 3) after pasting, finishing a n
 
 `gc` prompts for a `.zip` filename. It requires the `zip` program, creates the archive in the current directory, and refuses to overwrite an existing path. Multi-item archives can use contiguous `V` rows or separate Space marks.
 
-With Space marks, `d` or `x` removes all marked rows from the buffer, `y` copies them to Salt's register, and `gc` compresses them into one ZIP. Marked names use the accent background; the selection panel shows the count. Removal takes effect on disk only after `:w` and its deletion confirmation. `c` or `s` changes one marked row; changing several complete rows is not supported yet. `Esc` clears all marks. Marks are cleared when the buffer changes or the directory is reloaded, but are preserved when you change the sort order.
+With Space marks, `d` removes marked rows from the buffer, `x` marks them for a deferred move, `y` copies them to Salt's register, and `gc` compresses them into one ZIP. A cut without a later paste leaves the source files untouched. Marked names use the accent background; the selection panel shows the count. Removal takes effect on disk only after `:w` and its deletion confirmation. `c` or `s` changes one marked row; changing several complete rows is not supported yet. `Esc` clears all marks. Marks are cleared when the buffer changes or the directory is reloaded, but are preserved when you change the sort order.
 
 ### Saving and leaving
 
 | Keys | Action |
 | --- | --- |
-| `:w` | Review all staged filesystem changes, then apply with Enter or `y`. |
+| `:w` | Review all staged filesystem changes, then confirm with `y`. |
 | `:wq` | Review and save, then quit. |
 | `q` or `:q` | Quit only when no edits are pending. |
 | `:q!` | Quit without saving staged edits. |
 | `:e!` | Discard staged edits and reload the directory. |
 | `Esc` | Return from insert or visual mode to normal mode. |
 
-The `:w` review lists every planned move, creation, copy, and deletion. Scroll it with `j`/`k` and cancel with Esc or `n`; cancelling leaves the buffer intact. A save with no filesystem changes does not open the review. Deleting with `dd` is immediate after its separate confirmation. Cutting with `xx` is deferred: if you quit or replace the cut register without pasting, the original entry stays untouched. Salt checks for name collisions before saving and refuses to overwrite unrelated existing paths.
+The `:w` review lists every planned move, creation, copy, and deletion. Confirm it with `y` for Yes; `n` or Esc cancels and leaves the buffer intact. The `dd` deletion dialog uses the same confirmation keys. Enter is reserved for selecting an item or submitting text in non-confirmation dialogs. A save with no filesystem changes does not open the review. Cutting with `xx` is deferred: if you quit or replace the cut register without pasting, the original entry stays untouched. Salt checks for name collisions before saving and refuses to overwrite unrelated existing paths.
 
 ## Configuration
 
@@ -177,11 +183,13 @@ Valid `by` values are `name`, `mtime`, and `size`. `reverse` defaults to `false`
 
 ## Development and scope
 
-Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --locked`, and `cargo build --release --locked` before publishing changes. Tests that create ZIP archives require `zip` on `PATH`.
+Run `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked`, and `cargo build --release --locked` before publishing changes. Tests that create ZIP archives require `zip` on `PATH`.
 
 See [Architecture](docs/architecture.md) for the buffer model, filesystem planning, and next structural improvements.
+See [Releasing](docs/releasing.md) for the release checklist and Homebrew tap setup.
 
 Salt is an evolving file manager, not a complete Neovim implementation. It has no SSH backend, trash integration, or full Vim command and register support yet. `V` selects contiguous rows; Space marks nonadjacent rows. Filesystem changes are local; keep backups of important data when testing destructive editing commands.
+Saving a batch is not fully transactional: if a filesystem operation fails partway through, some earlier operations may already have completed. Check the directory before retrying after an error.
 
 ## Acknowledgments
 

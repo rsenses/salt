@@ -28,3 +28,7 @@ jobs:
         run: cargo test --locked
       - name: Build release binary
         run: cargo build --release --locked
+      - name: Check CLI metadata
+        run: |
+          target/release/salt --version | grep -E '^salt [0-9]+\.[0-9]+\.[0-9]+$'
+          target/release/salt --help

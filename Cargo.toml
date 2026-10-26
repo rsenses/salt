@@ -5,6 +5,8 @@ edition = "2024"
 description = "A local terminal file manager with an editable directory buffer"
 license = "MIT"
 readme = "README.md"
+homepage = "https://github.com/rsenses/salt"
+repository = "https://github.com/rsenses/salt"
 publish = false
 
 [dependencies]

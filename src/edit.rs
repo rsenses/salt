@@ -28,6 +28,7 @@ enum Register {
     Copy(Row),
     Cut(Row),
     Rows(Vec<Row>, bool),
+    MarkedCut(Vec<Row>),
     Text(String),
 }
 
@@ -239,6 +240,25 @@ impl Buffer {
             self.col = 0;
             self.clamp();
         }
+    }
+    pub fn mark_rows_for_move(&mut self, indices: &[usize]) -> bool {
+        if indices.is_empty()
+            || indices.iter().any(|&index| {
+                self.rows
+                    .get(index)
+                    .is_none_or(|row| row.original.is_none())
+            })
+            || indices.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return false;
+        }
+        self.register = Some(Register::MarkedCut(
+            indices
+                .iter()
+                .map(|&index| self.rows[index].clone())
+                .collect(),
+        ));
+        true
     }
     fn clamp(&mut self) {
         if self.rows.is_empty() {
@@ -486,7 +506,10 @@ impl Buffer {
             .map(Register::Cut);
     }
     pub fn cut_pending(&self) -> bool {
-        matches!(self.register.as_ref(), Some(Register::Cut(_)))
+        matches!(
+            self.register.as_ref(),
+            Some(Register::Cut(_) | Register::MarkedCut(_))
+        )
     }
     pub fn forget_deleted(&mut self, path: &Path) {
         let refers_to_deleted = match &self.register {
@@ -494,7 +517,7 @@ impl Buffer {
                 .original
                 .as_ref()
                 .is_some_and(|source| source.starts_with(path)),
-            Some(Register::Rows(rows, _)) => rows.iter().any(|row| {
+            Some(Register::Rows(rows, _) | Register::MarkedCut(rows)) => rows.iter().any(|row| {
                 row.original
                     .as_ref()
                     .is_some_and(|source| source.starts_with(path))
@@ -525,15 +548,16 @@ impl Buffer {
             Register::Copy(row) => (vec![row], false),
             Register::Cut(row) => (vec![row], true),
             Register::Rows(rows, cut) => (rows, cut),
+            Register::MarkedCut(rows) => (rows, true),
             _ => unreachable!(),
         };
         if pasted.is_empty()
             || (cut
-                && pasted.len() == 1
-                && pasted[0]
-                    .original
-                    .as_ref()
-                    .is_some_and(|path| path.parent() == Some(browser.path())))
+                && pasted.iter().all(|row| {
+                    row.original
+                        .as_ref()
+                        .is_some_and(|path| path.parent() == Some(browser.path()))
+                }))
         {
             if cut {
                 self.register = None;
@@ -1359,6 +1383,38 @@ mod tests {
         assert_eq!(fs::read_to_string(root.path().join("to/a")).unwrap(), "a");
         assert_eq!(fs::read_to_string(root.path().join("to/c")).unwrap(), "c");
         assert!(!root.path().join("to/b").exists());
+    }
+    #[test]
+    fn marked_cut_moves_only_after_paste_and_save() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("from")).unwrap();
+        fs::create_dir(root.path().join("to")).unwrap();
+        for name in ["a", "b", "c"] {
+            fs::write(root.path().join("from").join(name), name).unwrap();
+        }
+        let mut browser = Browser::new(root.path().join("from")).unwrap();
+        let mut buffer = Buffer::from_browser(&browser);
+        assert!(buffer.mark_rows_for_move(&[0, 2]));
+        assert!(buffer.cut_pending());
+        assert!(!buffer.dirty);
+        assert_eq!(buffer.rows.len(), 3);
+        assert!(
+            buffer
+                .plan(browser.path(), &buffer.rows)
+                .unwrap()
+                .is_empty()
+        );
+        browser.navigate_to(&root.path().join("to")).unwrap();
+        buffer.load(&browser);
+        let original = buffer.rows.clone();
+        buffer.paste(&browser);
+        let plan = buffer.plan(browser.path(), &original).unwrap();
+        assert_eq!(plan.renames.len(), 2);
+        plan.apply().unwrap();
+        assert!(!root.path().join("from/a").exists());
+        assert!(!root.path().join("from/c").exists());
+        assert_eq!(fs::read_to_string(root.path().join("to/a")).unwrap(), "a");
+        assert_eq!(fs::read_to_string(root.path().join("to/c")).unwrap(), "c");
     }
 
     #[test]

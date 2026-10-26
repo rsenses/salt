@@ -1,3 +1,7 @@
+# Set false to hide Nerd Font icons. Defaults to true when omitted.
+[ui]
+icons = true
+
 # Optional openers for the gx menu. Keep only applications installed on your system.
 [opener]
 finder = [

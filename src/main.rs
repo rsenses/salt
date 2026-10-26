@@ -6,6 +6,7 @@ mod local_search;
 mod model;
 mod open;
 mod sort;
+mod ui;
 mod watch;
 mod zoxide;
 
@@ -21,12 +22,13 @@ use model::{Browser, EntryKind};
 use open::{Choice, OpenConfig};
 use ratatui::{
     Terminal,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{List, ListItem, ListState, Paragraph},
 };
 use sort::{SortBy, SortSpec};
+use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::HashSet,
     env, fs, io,
@@ -35,12 +37,15 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
+use ui::{Alert, Popup, PopupAction, WhichKey};
 use watch::DirectoryWatcher;
 
 // ANSI colors inherit their actual values from the terminal theme.
 const ACCENT: Color = Color::Red;
 const SEARCH_HIGHLIGHT: Color = Color::Green;
 const NEW_ENTRY_HIGHLIGHT: Color = Color::Yellow;
+const FOOTER_MODE: Color = Color::Cyan;
+const FOOTER_DETAIL: Color = Color::Magenta;
 
 fn accent_style() -> Style {
     Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
@@ -152,6 +157,8 @@ fn reload_config_and_directory(
     original: &mut Vec<Row>,
     entry_flash: &mut Option<EntryFlash>,
     open_config: &mut OpenConfig,
+    icons: &mut bool,
+    icons_override: Option<Icons>,
 ) -> io::Result<()> {
     let config = AppConfig::load()?;
     let column = edit.col;
@@ -167,6 +174,7 @@ fn reload_config_and_directory(
     *original = edit.rows.clone();
     *entry_flash = EntryFlash::new(newly_visible_rows(edit, &visible_before));
     *open_config = config.open;
+    *icons = effective_icons(icons_override, config.icons);
     Ok(())
 }
 
@@ -187,27 +195,34 @@ impl Icons {
     }
 }
 
-fn args() -> Result<(PathBuf, Icons, Option<PathBuf>), String> {
+fn effective_icons(override_mode: Option<Icons>, configured: bool) -> bool {
+    override_mode.map_or(configured, Icons::enabled)
+}
+
+fn args() -> Result<(PathBuf, Option<Icons>, Option<PathBuf>), String> {
     let mut path = None;
     let mut cwd_file = None;
-    let mut icons = Icons::Always;
+    let mut icons = None;
     let mut iter = env::args_os().skip(1);
     while let Some(arg) = iter.next() {
         let s = arg.to_string_lossy();
         if s == "--help" || s == "-h" {
             println!(
-                "Usage: salt [--icons auto|always|never] [--cwd-file FILE] [PATH]\nIcons are enabled by default. Use --icons never to disable them. Set SALT_NERD_FONT=1 to enable icons in auto mode. --cwd-file writes the final directory as a NUL-terminated path for a shell wrapper."
+                "Usage: salt [--icons auto|always|never] [--cwd-file FILE] [PATH]\nIcons are enabled by default. Set [ui] icons = false in salt.toml to disable them, or use --icons to override the setting. Set SALT_NERD_FONT=1 to enable icons in auto mode. --cwd-file writes the final directory as a NUL-terminated path for a shell wrapper."
             );
             std::process::exit(0);
+        } else if s == "--version" || s == "-V" {
+            println!("salt {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
         } else if s == "--icons" {
-            icons = parse_icons(
+            icons = Some(parse_icons(
                 &iter
                     .next()
                     .ok_or("--icons requires a value")?
                     .to_string_lossy(),
-            )?;
+            )?);
         } else if let Some(value) = s.strip_prefix("--icons=") {
-            icons = parse_icons(value)?;
+            icons = Some(parse_icons(value)?);
         } else if s == "--cwd-file" {
             cwd_file = Some(PathBuf::from(
                 iter.next().ok_or("--cwd-file requires a path")?,
@@ -281,7 +296,7 @@ const HELP_LINES: &[&str] = &[
     "  dd                  confirm and delete immediately",
     "  gx                  choose a configured opener",
     "  gc                  create .zip (in V: selected rows)",
-    "  with marks: d/x/y    delete / copy selected rows",
+    "  with marks: d/x/y    delete / cut / copy selected rows",
     "  with marks: gc       compress selected rows",
     "  g/d/c/y/r/x         show available next keys",
     "  ,                   show sorting options",
@@ -293,7 +308,334 @@ const HELP_LINES: &[&str] = &[
     "  q / :q              quit when no edits are pending",
     "  :q!                 quit without saving",
     "  ?                   show / close this help",
+    "  / (in help)         filter this help by key or description",
 ];
+
+#[derive(Clone, Copy)]
+enum HelpRow {
+    Section(&'static str),
+    Binding(&'static str, &'static str),
+}
+
+fn help_rows(query: &str) -> Vec<HelpRow> {
+    let needle = query.to_lowercase();
+    let mut section = "";
+    let mut section_matches = false;
+    let mut shown_section = false;
+    let mut rows = Vec::new();
+    for line in HELP_LINES {
+        if line.is_empty() {
+            continue;
+        }
+        if !line.starts_with(' ') {
+            section = line;
+            section_matches = line.to_lowercase().contains(&needle);
+            shown_section = false;
+            if needle.is_empty() {
+                rows.push(HelpRow::Section(section));
+                shown_section = true;
+            }
+            continue;
+        }
+        if !needle.is_empty() && !section_matches && !line.to_lowercase().contains(&needle) {
+            continue;
+        }
+        if !shown_section {
+            rows.push(HelpRow::Section(section));
+            shown_section = true;
+        }
+        let trimmed = line.trim();
+        let split = trimmed.find("  ").unwrap_or(trimmed.len());
+        rows.push(HelpRow::Binding(
+            trimmed[..split].trim(),
+            trimmed[split..].trim(),
+        ));
+    }
+    rows
+}
+
+fn help_visible_height(area: Rect) -> usize {
+    area.height.saturating_sub(2).min(32).saturating_sub(6) as usize
+}
+
+fn first_help_binding(rows: &[HelpRow]) -> usize {
+    rows.iter()
+        .position(|row| matches!(row, HelpRow::Binding(..)))
+        .unwrap_or(0)
+}
+
+fn move_help_selection(rows: &[HelpRow], selected: usize, forward: bool) -> usize {
+    let mut indices: Box<dyn Iterator<Item = usize>> = if forward {
+        Box::new((selected + 1)..rows.len())
+    } else {
+        Box::new((0..selected).rev())
+    };
+    indices
+        .find(|&index| matches!(rows[index], HelpRow::Binding(..)))
+        .unwrap_or(selected)
+}
+
+fn mode_label(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Normal => "NORMAL",
+        Mode::Insert => "INSERT",
+        Mode::Visual => "VISUAL",
+        Mode::VisualLine => "VISUAL LINE",
+        Mode::VisualBlock => "VISUAL BLOCK",
+    }
+}
+
+fn file_size(size: u64) -> String {
+    const UNITS: &[&str] = &["B", "K", "M", "G", "T"];
+    let mut value = size as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{size}B")
+    } else {
+        format!("{value:.0}{}", UNITS[unit])
+    }
+}
+
+fn permissions(path: &Path) -> Option<String> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    let kind = if metadata.file_type().is_symlink() {
+        'l'
+    } else if metadata.is_dir() {
+        'd'
+    } else {
+        '-'
+    };
+    let mode = metadata.permissions().mode();
+    let mut result = String::from(kind);
+    for (bit, symbol) in [
+        (0o400, 'r'),
+        (0o200, 'w'),
+        (0o100, 'x'),
+        (0o040, 'r'),
+        (0o020, 'w'),
+        (0o010, 'x'),
+        (0o004, 'r'),
+        (0o002, 'w'),
+        (0o001, 'x'),
+    ] {
+        result.push(if mode & bit != 0 { symbol } else { '-' });
+    }
+    Some(result)
+}
+
+fn display_directory_path(path: &Path, home: Option<&Path>) -> String {
+    if let Some(relative) = home.and_then(|home| path.strip_prefix(home).ok()) {
+        if relative.as_os_str().is_empty() {
+            "~".into()
+        } else {
+            format!("~/{}", relative.display())
+        }
+    } else {
+        path.display().to_string()
+    }
+}
+
+fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, browser: &Browser, edit: &Buffer) {
+    let mode = mode_label(edit.mode);
+    let selected = edit.selected();
+    let path = edit.selected_path(browser.path());
+    let size = path
+        .as_ref()
+        .and_then(|path| fs::symlink_metadata(path).ok())
+        .and_then(|meta| meta.is_file().then_some(meta.len()))
+        .map(file_size)
+        .unwrap_or_else(|| "-".into());
+    let left = Line::from(vec![
+        Span::styled(
+            format!(" {mode} "),
+            Style::default()
+                .fg(Color::Black)
+                .bg(FOOTER_MODE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {size} "),
+            Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
+        ),
+    ]);
+    let left_width = (mode.len() + size.len() + 4) as u16;
+    let position = if edit.rows.is_empty() {
+        "0/0".to_string()
+    } else {
+        format!("{}/{}", edit.row + 1, edit.rows.len())
+    };
+    let percent = if edit.rows.len() <= 1 {
+        0
+    } else {
+        edit.row.saturating_mul(100) / (edit.rows.len() - 1)
+    };
+    let location = if edit.rows.is_empty() || edit.row == 0 {
+        format!("Top {percent}%")
+    } else if edit.row + 1 == edit.rows.len() {
+        format!("Bot {percent}%")
+    } else {
+        format!("{percent}%")
+    };
+    let permission_text = path
+        .as_deref()
+        .and_then(permissions)
+        .unwrap_or_else(|| "----------".into());
+    let right_width = (permission_text.len() + location.len() + position.len() + 5) as u16;
+    let layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(left_width),
+            Constraint::Min(0),
+            Constraint::Length(right_width),
+        ])
+        .split(area);
+    frame.render_widget(Paragraph::new(left), layout[0]);
+    let mut middle = selected.map_or(String::new(), |row| row.name.clone());
+    if edit.dirty {
+        middle.push_str(" [+]");
+    }
+    if edit.cut_pending() {
+        middle.push_str(" [pending cut]");
+    }
+    let sort_label = format!("  {}   ", browser.sort().label());
+    let middle_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(sort_label.chars().count() as u16),
+        ])
+        .split(layout[1]);
+    frame.render_widget(
+        Paragraph::new(format!(" {middle}")).style(Style::default().fg(FOOTER_DETAIL)),
+        middle_layout[0],
+    );
+    frame.render_widget(
+        Paragraph::new(sort_label).style(Style::default().add_modifier(Modifier::DIM)),
+        middle_layout[1],
+    );
+    let mut permission_spans = Vec::new();
+    for ch in permission_text.chars() {
+        let color = match ch {
+            'r' => Color::Yellow,
+            'w' => Color::Red,
+            'x' => Color::Green,
+            _ => FOOTER_DETAIL,
+        };
+        permission_spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
+    }
+    permission_spans.push(Span::raw(" "));
+    permission_spans.push(Span::styled(
+        format!(" {location} "),
+        Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
+    ));
+    permission_spans.push(Span::styled(
+        format!(" {position} "),
+        Style::default()
+            .fg(Color::Black)
+            .bg(FOOTER_MODE)
+            .add_modifier(Modifier::BOLD),
+    ));
+    frame.render_widget(
+        Paragraph::new(Line::from(permission_spans)).alignment(Alignment::Right),
+        layout[2],
+    );
+}
+
+fn render_help(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    rows: &[HelpRow],
+    query: &str,
+    search_active: bool,
+    selected: usize,
+    scroll: usize,
+) {
+    let Some(content) = (Popup {
+        title: "Salt help",
+        description: "Search keybindings with /",
+        actions: &[],
+        width: 100,
+        height: 32,
+    })
+    .render(frame, area) else {
+        return;
+    };
+    let inner_x = content.x;
+    let inner_width = content.width;
+    let search_line = if query.is_empty() && !search_active {
+        Line::from(Span::styled(
+            " /  Search help",
+            Style::default().add_modifier(Modifier::DIM),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled(" /  ", accent_style()),
+            Span::raw(query.to_string()),
+            Span::raw(if search_active { "▏" } else { "" }),
+        ])
+    };
+    frame.render_widget(
+        Paragraph::new(search_line),
+        Rect::new(inner_x, content.y, inner_width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new("─".repeat(inner_width as usize)).style(Style::default().fg(FOOTER_MODE)),
+        Rect::new(inner_x, content.y + 1, inner_width, 1),
+    );
+    let content_height = content.height.saturating_sub(2) as usize;
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" No matches"),
+            Rect::new(inner_x, content.y + 2, inner_width, 1),
+        );
+        return;
+    }
+    let key_width = (inner_width / 4).clamp(14, 26).min(inner_width);
+    for (offset, row) in rows.iter().skip(scroll).take(content_height).enumerate() {
+        let y = content.y + 2 + offset as u16;
+        match row {
+            HelpRow::Section(title) => frame.render_widget(
+                Paragraph::new(format!(" {title}")).style(
+                    Style::default()
+                        .fg(FOOTER_MODE)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Rect::new(inner_x, y, inner_width, 1),
+            ),
+            HelpRow::Binding(key, description) => {
+                let is_selected = scroll + offset == selected;
+                let key_style = if is_selected {
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(ACCENT)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    accent_style()
+                };
+                let description_style = if is_selected {
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(FOOTER_DETAIL)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                frame.render_widget(
+                    Paragraph::new(format!(" {key}")).style(key_style),
+                    Rect::new(inner_x, y, key_width, 1),
+                );
+                frame.render_widget(
+                    Paragraph::new(format!(" {description}")).style(description_style),
+                    Rect::new(inner_x + key_width, y, inner_width - key_width, 1),
+                );
+            }
+        }
+    }
+}
 
 fn prefix_hints(prefix: char) -> &'static [(&'static str, &'static str)] {
     match prefix {
@@ -349,7 +691,8 @@ fn marked_hints(multiple_rows: bool) -> &'static [(&'static str, &'static str)] 
     if multiple_rows {
         &[
             ("Space", "mark or unmark current row"),
-            ("d / x", "delete marked rows"),
+            ("d", "delete marked rows"),
+            ("x", "cut marked rows"),
             ("y", "copy marked rows"),
             ("g c", "compress marked rows"),
             ("Esc", "clear marks"),
@@ -357,7 +700,8 @@ fn marked_hints(multiple_rows: bool) -> &'static [(&'static str, &'static str)] 
     } else {
         &[
             ("Space", "mark or unmark current row"),
-            ("d / x", "delete marked row"),
+            ("d", "delete marked row"),
+            ("x", "cut marked row"),
             ("c / s", "change marked row"),
             ("y", "copy marked row"),
             ("g c", "compress marked row"),
@@ -399,12 +743,13 @@ fn apply_sort(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (path, icons, cwd_file) =
+    let (path, icons_override, cwd_file) =
         args().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let mut browser = Browser::new(path)?;
     let config = AppConfig::load()?;
     browser.set_sort_config(config.sort)?;
     let open_config = config.open;
+    let icons = effective_icons(icons_override, config.icons);
     enable_raw_mode()?;
     let mut screen = ScreenGuard {
         alternate: false,
@@ -414,7 +759,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     execute!(stdout, EnterAlternateScreen)?;
     screen.alternate = true;
     let mut terminal = Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
-    let result = run(&mut terminal, &mut browser, open_config, icons);
+    let result = run(
+        &mut terminal,
+        &mut browser,
+        open_config,
+        icons,
+        icons_override,
+    );
     drop(terminal);
     let restore = screen.restore();
     result?;
@@ -466,7 +817,8 @@ fn run(
     terminal: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>,
     browser: &mut Browser,
     mut open_config: OpenConfig,
-    icons: Icons,
+    mut icons: bool,
+    icons_override: Option<Icons>,
 ) -> io::Result<()> {
     let mut edit = Buffer::from_browser(browser);
     let mut original = edit.rows.clone();
@@ -490,8 +842,12 @@ fn run(
     let mut queued_key: Option<KeyEvent> = None;
     let mut help_open = false;
     let mut help_scroll = 0usize;
+    let mut help_selected = 1usize;
+    let mut help_query = String::new();
+    let mut help_search_active = false;
     let mut quit_after_save = false;
     let mut entry_flash: Option<EntryFlash> = None;
+    let home_dir = env::var_os("HOME").map(PathBuf::from);
     let (launch_errors, pending_errors) = mpsc::channel::<String>();
     let mut menu: Option<(PathBuf, Vec<Choice>, usize)> = None;
     loop {
@@ -533,95 +889,140 @@ fn run(
             status = error;
         }
         terminal.draw(|frame| {
-            let chunks = Layout::default().direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
+            let modal_open = help_open
+                || menu.is_some()
+                || archive_input.is_some()
+                || pending_delete.is_some()
+                || pending_plan.is_some();
+            let modal_fits = Popup::fits(frame.area().width, frame.area().height);
+            let alert_text = if modal_open && !modal_fits {
+                Some(("notice", "Enlarge terminal to view this dialog".to_string()))
+            } else if modal_open {
+                None
+            } else if let Some((query, _, _)) = &search {
+                Some(("search", format!("{query}▏")))
+            } else if let Some(cmd) = &command {
+                Some(("command", format!(":{cmd}▏")))
+            } else if !status.is_empty() {
+                Some(("notice", status.clone()))
+            } else {
+                None
+            };
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(u16::from(alert_text.is_some())),
+                    Constraint::Length(1),
+                ])
                 .split(frame.area());
-            frame.render_widget(Paragraph::new(Line::from(vec![
-                Span::styled(browser.path().display().to_string(), accent_style()),
-                Span::raw(format!(" · {}", browser.sort().label())),
-            ])), chunks[0]);
-            let highlighted_query = search.as_ref().map(|(query, _, _)| query.as_str())
-                .or(last_search.as_deref()).unwrap_or("");
-            let rows: Vec<_> = edit.rows.iter().enumerate().map(|(i, row)| {
-                let suffix = if row.kind == EntryKind::Directory && !row.name.ends_with('/') { "/" } else { "" };
-                let prefix = icons::icon(&row.name, row.kind, icons.enabled());
-                let marked = edit.marked.contains(&i);
-                let entry_style = if row.kind == EntryKind::Directory {
-                    accent_style()
-                } else {
-                    Style::default()
-                };
-                let mut spans = vec![
-                    Span::raw(" "),
-                    Span::styled(prefix.to_string(), entry_style),
-                ];
-                let selection = edit.visual_range(i);
-                let matches = matching_columns(&row.name, highlighted_query);
-                let flash_style = entry_flash.as_ref().and_then(|flash| flash.style(row));
-                for (col, ch) in row.name.chars().enumerate() {
-                    let selected = selection.is_some_and(|(start, end)| col >= start && col < end);
-                    let style = if let Some(style) = flash_style {
-                        style
-                    } else if i == edit.row && col == edit.col {
-                        accent_background()
-                    } else if matches.get(col).copied().unwrap_or(false) {
-                        search_background()
-                    } else if selected || marked {
-                        accent_background()
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    display_directory_path(browser.path(), home_dir.as_deref()),
+                    accent_style(),
+                )),
+                chunks[0],
+            );
+            let highlighted_query = search
+                .as_ref()
+                .map(|(query, _, _)| query.as_str())
+                .or(last_search.as_deref())
+                .unwrap_or("");
+            let rows: Vec<_> = edit
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    let suffix = if row.kind == EntryKind::Directory && !row.name.ends_with('/') {
+                        "/"
                     } else {
-                        entry_style
+                        ""
                     };
-                    spans.push(Span::styled(ch.to_string(), style));
-                }
-                if i == edit.row && edit.col >= row.name.chars().count() {
-                    spans.push(Span::styled(" ", accent_background()));
-                }
-                spans.push(Span::styled(suffix.to_string(), entry_style));
-                let line = Line::from(spans);
-                ListItem::new(line)
-            }).collect();
-            let list = List::new(rows);
-            let mut state = ListState::default().with_selected((!edit.rows.is_empty()).then_some(edit.row));
-            frame.render_stateful_widget(list, chunks[1], &mut state);
-            let help = if help_open { "Help · j/k scroll · ?/Esc/q close".to_string() }
-                else if menu.is_some() { "j/k choose · Enter open · Esc cancel".to_string() }
-                else if let Some((paths, name)) = &archive_input { format!("Compress {} item(s) · name: {} · Enter create · Esc cancel", paths.len(), name) }
-                else if pending_delete.is_some() { "Delete permanently? y yes · n/Esc cancel".to_string() }
-                else if pending_plan.is_some() {
-                    if frame.area().width < 22 || frame.area().height < 8 {
-                        "Enlarge terminal to review :w · Esc/n cancel".to_string()
+                    let prefix = icons::icon(&row.name, row.kind, icons);
+                    let marked = edit.marked.contains(&i);
+                    let entry_style = if row.kind == EntryKind::Directory {
+                        accent_style()
                     } else {
-                        "Review :w · Enter/y apply · Esc/n cancel · j/k scroll".to_string()
+                        Style::default()
+                    };
+                    let mut spans = vec![
+                        Span::raw(" "),
+                        Span::styled(prefix.to_string(), entry_style),
+                    ];
+                    let selection = edit.visual_range(i);
+                    let matches = matching_columns(&row.name, highlighted_query);
+                    let flash_style = entry_flash.as_ref().and_then(|flash| flash.style(row));
+                    for (col, ch) in row.name.chars().enumerate() {
+                        let selected =
+                            selection.is_some_and(|(start, end)| col >= start && col < end);
+                        let style = if let Some(style) = flash_style {
+                            style
+                        } else if i == edit.row && col == edit.col {
+                            accent_background()
+                        } else if matches.get(col).copied().unwrap_or(false) {
+                            search_background()
+                        } else if selected || marked {
+                            accent_background()
+                        } else {
+                            entry_style
+                        };
+                        spans.push(Span::styled(ch.to_string(), style));
                     }
-                }
-                else if let Some(cmd) = &command { format!(":{cmd}") }
-                else if let Some((query, _, _)) = &search { format!("/{query} · Enter accept · Esc cancel") }
-                else if !status.is_empty() { status.clone() }
-                else { format!("{:?}{}{} · ? help · , sort · Space mark · V select · j/k rows · h/l cursor · H/L folders · :w save",
-                    edit.mode, if edit.dirty { " [+]" } else { "" }, if edit.cut_pending() { " [pending cut]" } else { "" }) };
-            let notice_visible = !status.is_empty() && !help_open && menu.is_none()
-                && pending_delete.is_none() && pending_plan.is_none()
-                && command.is_none() && search.is_none();
-            let footer_style = if notice_visible {
-                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
-            } else { Style::default() };
-            frame.render_widget(Paragraph::new(help).style(footer_style), chunks[2]);
+                    if i == edit.row && edit.col >= row.name.chars().count() {
+                        spans.push(Span::styled(" ", accent_background()));
+                    }
+                    spans.push(Span::styled(suffix.to_string(), entry_style));
+                    let line = Line::from(spans);
+                    ListItem::new(line)
+                })
+                .collect();
+            let list = List::new(rows);
+            let mut state =
+                ListState::default().with_selected((!edit.rows.is_empty()).then_some(edit.row));
+            frame.render_stateful_widget(list, chunks[1], &mut state);
+            if let Some((label, message)) = &alert_text {
+                Alert { label, message }.render(frame, chunks[2]);
+            }
+            render_footer(frame, chunks[3], browser, &edit);
             if let Some((path, choices, selected)) = &menu {
-                let width = frame.area().width.saturating_sub(4).clamp(20, 60).min(frame.area().width);
-                let height = (choices.len() as u16 + 2).min(frame.area().height);
-                let popup = Rect::new(frame.area().x + frame.area().width.saturating_sub(width) / 2,
-                    frame.area().y + frame.area().height.saturating_sub(height) / 2, width, height);
-                frame.render_widget(Clear, popup);
-                let title = format!("Open with: {}", path.file_name().unwrap_or_default().to_string_lossy());
-                let rows: Vec<_> = choices.iter().map(|choice| ListItem::new(choice.desc.as_str())).collect();
-                let list = List::new(rows).block(Block::default().title(title).borders(Borders::ALL)
-                    .border_style(accent_style()))
-                    .highlight_style(accent_background());
-                let mut state = ListState::default().with_selected(Some(*selected));
-                frame.render_stateful_widget(list, popup, &mut state);
+                let description = path.display().to_string();
+                let actions = [
+                    PopupAction {
+                        key: "j/k",
+                        label: "Choose",
+                    },
+                    PopupAction {
+                        key: "Enter",
+                        label: "Open",
+                    },
+                    PopupAction {
+                        key: "Esc",
+                        label: "Cancel",
+                    },
+                ];
+                let popup = Popup {
+                    title: "Open with",
+                    description: &description,
+                    actions: &actions,
+                    width: 70,
+                    height: (choices.len() + 7) as u16,
+                };
+                let rows: Vec<_> = choices
+                    .iter()
+                    .map(|choice| ListItem::new(choice.desc.as_str()))
+                    .collect();
+                if let Some(body) = popup.render(frame, frame.area()) {
+                    let list = List::new(rows).highlight_style(accent_background());
+                    let mut state = ListState::default().with_selected(Some(*selected));
+                    frame.render_stateful_widget(list, body, &mut state);
+                }
             }
             let hints = if marked_g_pending {
-                Some(("g · marked rows".to_string(), &[("c", "compress marked rows")][..]))
+                Some((
+                    "g · marked rows".to_string(),
+                    &[("c", "compress marked rows")][..],
+                ))
             } else if let Some(prefix) = edit.pending {
                 let choices = if edit.mode == Mode::VisualLine {
                     &[("c", "compress selection as .zip")][..]
@@ -629,7 +1030,10 @@ fn run(
                     prefix_hints(prefix)
                 };
                 Some((format!("{prefix} · next keys · Esc cancels"), choices))
-            } else if matches!(edit.mode, Mode::Visual | Mode::VisualLine | Mode::VisualBlock) {
+            } else if matches!(
+                edit.mode,
+                Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+            ) {
                 let multiple_rows = edit.visual_anchor.is_some_and(|(row, _)| row != edit.row);
                 let mode = match edit.mode {
                     Mode::Visual => "v",
@@ -637,86 +1041,126 @@ fn run(
                     Mode::VisualBlock => "Ctrl+v",
                     _ => unreachable!(),
                 };
-                Some((format!("{mode} · selection"), visual_hints(edit.mode, multiple_rows)))
+                Some((
+                    format!("{mode} · selection"),
+                    visual_hints(edit.mode, multiple_rows),
+                ))
             } else if !edit.marked.is_empty() {
-                Some((format!("Space · {} marked", edit.marked.len()), marked_hints(edit.marked.len() > 1)))
+                Some((
+                    format!("Space · {} marked", edit.marked.len()),
+                    marked_hints(edit.marked.len() > 1),
+                ))
             } else {
                 None
             };
-            if let Some((title, hints)) = hints.filter(|(_, choices)| {
-                !choices.is_empty() && !help_open && menu.is_none() && archive_input.is_none()
-            }) {
-                    let area = frame.area();
-                    let width = area.width.saturating_sub(2).min(48);
-                    let height = (hints.len() as u16 + 2).min(area.height.saturating_sub(1));
-                    if width >= 12 && height >= 3 {
-                        let popup = Rect::new(area.right().saturating_sub(width + 1),
-                            area.bottom().saturating_sub(height + 1), width, height);
-                        let lines: Vec<Line<'_>> = hints.iter().map(|(key, action)| {
-                            Line::from(vec![
-                                Span::styled(format!("  {key:<9}"), accent_style()),
-                                Span::raw(format!(" {action}")),
-                            ])
-                        }).collect();
-                        frame.render_widget(Clear, popup);
-                        frame.render_widget(Paragraph::new(lines)
-                            .block(Block::default().title(title)
-                                .borders(Borders::ALL).border_style(accent_style())), popup);
-                    }
+            if let Some((title, hints)) =
+                hints.filter(|(_, choices)| !choices.is_empty() && !modal_open)
+            {
+                WhichKey {
+                    title: &title,
+                    choices: hints,
+                }
+                .render(frame, frame.area());
             }
             if let Some(plan) = &pending_plan {
-                let area = frame.area();
                 let details = plan_preview_lines(plan, browser.path());
-                let width = area.width.saturating_sub(2).min(100);
-                let height = area.height.saturating_sub(2).min(24).min((details.len() + 6) as u16);
-                if width >= 20 && height >= 6 {
-                    let popup = Rect::new(area.x + area.width.saturating_sub(width) / 2,
-                        area.y + area.height.saturating_sub(height) / 2, width, height);
-                    let visible = height.saturating_sub(6) as usize;
-                    let mut lines = vec![Line::raw(plan.summary()), Line::raw("")];
-                    lines.extend(details.iter().skip(plan_scroll).take(visible).map(|line| Line::raw(line.as_str())));
-                    lines.push(Line::raw(""));
-                    lines.push(Line::raw("Enter/y apply · Esc/n cancel · j/k scroll"));
-                    frame.render_widget(Clear, popup);
-                    frame.render_widget(Paragraph::new(lines)
-                        .block(Block::default().title(format!("Review :w · {}/{}", plan_scroll.saturating_add(1).min(details.len()), details.len()))
-                            .borders(Borders::ALL).border_style(accent_style())), popup);
+                let summary = plan.summary();
+                let title = format!(
+                    "Review :w · {}/{}",
+                    plan_scroll.saturating_add(1).min(details.len()),
+                    details.len()
+                );
+                let actions = [
+                    PopupAction {
+                        key: "y",
+                        label: "Yes",
+                    },
+                    PopupAction {
+                        key: "n",
+                        label: "No",
+                    },
+                    PopupAction {
+                        key: "j/k",
+                        label: "Scroll",
+                    },
+                ];
+                let popup = Popup {
+                    title: &title,
+                    description: &summary,
+                    actions: &actions,
+                    width: 100,
+                    height: (details.len() + 7).min(24) as u16,
+                };
+                if let Some(body) = popup.render(frame, frame.area()) {
+                    let lines: Vec<Line<'_>> = details
+                        .iter()
+                        .skip(plan_scroll)
+                        .take(body.height as usize)
+                        .map(|line| Line::raw(line.as_str()))
+                        .collect();
+                    frame.render_widget(Paragraph::new(lines), body);
                 }
             }
             if let Some(path) = &pending_delete {
-                let area = frame.area();
-                let popup = Rect::new(area.x + area.width / 6, area.y + area.height / 3,
-                    area.width * 2 / 3, 5.min(area.height));
-                frame.render_widget(Clear, popup);
-                frame.render_widget(Paragraph::new(format!("Delete {} permanently?\nDirectories and their contents will be removed.\ny = delete · n/Esc = cancel", path.display()))
-                    .block(Block::default().title("Confirm deletion").borders(Borders::ALL)
-                        .border_style(accent_style())), popup);
+                let description = path.display().to_string();
+                let actions = [
+                    PopupAction {
+                        key: "y",
+                        label: "Yes",
+                    },
+                    PopupAction {
+                        key: "n",
+                        label: "No",
+                    },
+                ];
+                let popup = Popup {
+                    title: "Delete permanently?",
+                    description: &description,
+                    actions: &actions,
+                    width: 96,
+                    height: 10,
+                };
+                if let Some(body) = popup.render(frame, frame.area()) {
+                    frame.render_widget(
+                        Paragraph::new("Directories and their contents will be removed."),
+                        body,
+                    );
+                }
             }
             if let Some((paths, name)) = &archive_input {
-                let area = frame.area();
-                let width = area.width.saturating_sub(2).min(64);
-                if width >= 20 && area.height >= 5 {
-                    let popup = Rect::new(area.x + area.width.saturating_sub(width) / 2,
-                        area.y + area.height.saturating_sub(5) / 2, width, 5);
-                    frame.render_widget(Clear, popup);
-                    frame.render_widget(Paragraph::new(format!("{} item(s) → {}\nEnter = create · Esc = cancel", paths.len(), name))
-                        .block(Block::default().title("Create ZIP archive").borders(Borders::ALL)
-                            .border_style(accent_style())), popup);
+                let description = format!("{} selected item(s)", paths.len());
+                let actions = [
+                    PopupAction {
+                        key: "Enter",
+                        label: "Create",
+                    },
+                    PopupAction {
+                        key: "Esc",
+                        label: "Cancel",
+                    },
+                ];
+                let popup = Popup {
+                    title: "Create ZIP archive",
+                    description: &description,
+                    actions: &actions,
+                    width: 70,
+                    height: 9,
+                };
+                if let Some(body) = popup.render(frame, frame.area()) {
+                    frame.render_widget(Paragraph::new(format!("Archive name: {name}▏")), body);
                 }
             }
             if help_open {
-                let area = frame.area();
-                let width = area.width.saturating_sub(2).min(86);
-                let height = area.height.saturating_sub(2).min(28);
-                let popup = Rect::new(area.x + area.width.saturating_sub(width) / 2,
-                    area.y + area.height.saturating_sub(height) / 2, width, height);
-                let visible = height.saturating_sub(2) as usize;
-                let lines: Vec<Line<'_>> = HELP_LINES.iter().skip(help_scroll).take(visible)
-                    .map(|line| Line::raw(*line)).collect();
-                frame.render_widget(Clear, popup);
-                frame.render_widget(Paragraph::new(lines)
-                    .block(Block::default().title(format!("Salt help · {}/{}", help_scroll + 1, HELP_LINES.len()))
-                        .borders(Borders::ALL).border_style(accent_style())), popup);
+                let rows = help_rows(&help_query);
+                render_help(
+                    frame,
+                    frame.area(),
+                    &rows,
+                    &help_query,
+                    help_search_active,
+                    help_selected,
+                    help_scroll,
+                );
             }
         })?;
         let key = if let Some(key) = queued_key.take() {
@@ -760,34 +1204,87 @@ fn run(
             continue;
         }
         if help_open {
-            let visible = terminal.size()?.height.saturating_sub(4).min(26) as usize;
-            let max_scroll = HELP_LINES.len().saturating_sub(visible.max(1));
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter => {
-                    help_open = false
+            let size = terminal.size()?;
+            let visible = help_visible_height(Rect::new(0, 0, size.width, size.height)).max(1);
+            if help_search_active {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter => help_search_active = false,
+                    KeyCode::Backspace => {
+                        help_query.pop();
+                        help_scroll = 0;
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        help_query.clear();
+                        help_scroll = 0;
+                    }
+                    KeyCode::Char(ch)
+                        if !key
+                            .modifiers
+                            .contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        help_query.push(ch);
+                        help_scroll = 0;
+                    }
+                    _ => {}
                 }
-                KeyCode::Char('j') | KeyCode::Down => {
-                    help_scroll = (help_scroll + 1).min(max_scroll)
+                if help_search_active {
+                    help_selected = first_help_binding(&help_rows(&help_query));
                 }
-                KeyCode::Char('k') | KeyCode::Up => help_scroll = help_scroll.saturating_sub(1),
-                KeyCode::PageDown => help_scroll = (help_scroll + visible).min(max_scroll),
-                KeyCode::PageUp => help_scroll = help_scroll.saturating_sub(visible),
-                _ => {}
+            } else {
+                let rows = help_rows(&help_query);
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter => {
+                        help_open = false
+                    }
+                    KeyCode::Char('/') => help_search_active = true,
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        help_selected = move_help_selection(&rows, help_selected, true)
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        help_selected = move_help_selection(&rows, help_selected, false)
+                    }
+                    KeyCode::PageDown => {
+                        for _ in 0..visible {
+                            help_selected = move_help_selection(&rows, help_selected, true);
+                        }
+                    }
+                    KeyCode::PageUp => {
+                        for _ in 0..visible {
+                            help_selected = move_help_selection(&rows, help_selected, false);
+                        }
+                    }
+                    _ => {}
+                }
+                if help_selected < help_scroll {
+                    help_scroll = help_selected;
+                }
+                if help_selected >= help_scroll + visible {
+                    help_scroll = help_selected + 1 - visible;
+                }
             }
             continue;
         }
         if let Some(path) = pending_delete.take() {
-            if key.code == KeyCode::Char('y') {
-                match edit::delete_disk(&path) {
-                    Ok(()) => {
-                        browser.refresh()?;
-                        edit.forget_deleted(&path);
-                        edit.load(browser);
-                        original = edit.rows.clone();
-                        status = format!("Deleted: {}", path.display());
+            match key.code {
+                KeyCode::Char('y') => {
+                    let size = terminal.size()?;
+                    if !Popup::fits(size.width, size.height) {
+                        pending_delete = Some(path);
+                        continue;
                     }
-                    Err(e) => status = format!("Could not delete: {e}"),
+                    match edit::delete_disk(&path) {
+                        Ok(()) => {
+                            browser.refresh()?;
+                            edit.forget_deleted(&path);
+                            edit.load(browser);
+                            original = edit.rows.clone();
+                            status = format!("Deleted: {}", path.display());
+                        }
+                        Err(e) => status = format!("Could not delete: {e}"),
+                    }
                 }
+                KeyCode::Char('n') | KeyCode::Esc => {}
+                _ => pending_delete = Some(path),
             }
             continue;
         }
@@ -802,9 +1299,9 @@ fn run(
             let visible = height.saturating_sub(6) as usize;
             let max_scroll = details_len.saturating_sub(visible.max(1));
             match key.code {
-                KeyCode::Enter | KeyCode::Char('y') => {
+                KeyCode::Char('y') => {
                     let size = terminal.size()?;
-                    if size.width < 22 || size.height < 8 {
+                    if !Popup::fits(size.width, size.height) {
                         continue;
                     }
                     let plan = pending_plan.take().unwrap();
@@ -856,6 +1353,10 @@ fn run(
                 }
                 KeyCode::Char('k') | KeyCode::Up => *selected = selected.saturating_sub(1),
                 KeyCode::Enter => {
+                    let size = terminal.size()?;
+                    if !Popup::fits(size.width, size.height) {
+                        continue;
+                    }
                     let chosen = choices[*selected].clone();
                     let path = path.clone();
                     menu = None;
@@ -876,6 +1377,10 @@ fn run(
                     name.pop();
                 }
                 KeyCode::Enter => {
+                    let size = terminal.size()?;
+                    if !Popup::fits(size.width, size.height) {
+                        continue;
+                    }
                     let paths = paths.clone();
                     let name = name.clone();
                     archive_input = None;
@@ -1025,17 +1530,43 @@ fn run(
                 }
                 KeyCode::Char('d' | 'x' | 'y') => {
                     let indices: Vec<_> = edit.marked.iter().copied().collect();
-                    let copy = key.code == KeyCode::Char('y');
-                    edit.rows_operator(&indices, if copy { 'y' } else { 'd' });
-                    edit.clear_marks();
-                    status = if copy {
-                        format!("Copied {} marked row(s)", indices.len())
-                    } else {
-                        format!(
-                            "Removed {} row(s) from the buffer; use :w to save",
-                            indices.len()
-                        )
+                    let (message, clear_marks) = match key.code {
+                        KeyCode::Char('y') => {
+                            edit.rows_operator(&indices, 'y');
+                            (
+                                format!(
+                                    "Copied {} marked item(s); paste with p, then save with :w",
+                                    indices.len()
+                                ),
+                                true,
+                            )
+                        }
+                        KeyCode::Char('x') if edit.dirty => {
+                            ("Save or discard changes before cutting".into(), false)
+                        }
+                        KeyCode::Char('x') if edit.mark_rows_for_move(&indices) => (
+                            format!(
+                                "Cut {} marked item(s); paste with p, then save with :w",
+                                indices.len()
+                            ),
+                            true,
+                        ),
+                        KeyCode::Char('x') => ("Cannot cut an unsaved item".into(), false),
+                        _ => {
+                            edit.rows_operator(&indices, 'd');
+                            (
+                                format!(
+                                    "Removed {} row(s) from the buffer; use :w to save",
+                                    indices.len()
+                                ),
+                                true,
+                            )
+                        }
                     };
+                    status = message;
+                    if clear_marks {
+                        edit.clear_marks();
+                    }
                     continue;
                 }
                 KeyCode::Char('c' | 's') => {
@@ -1113,7 +1644,10 @@ fn run(
                         edit.visual_operator('c');
                     }
                 }
-                KeyCode::Char('y') => edit.visual_operator('y'),
+                KeyCode::Char('y') => {
+                    edit.visual_operator('y');
+                    status = "Copied selection; paste with p, then save with :w".into();
+                }
                 KeyCode::Char('g') if edit.mode == Mode::VisualLine => edit.pending = Some('g'),
                 _ => {}
             }
@@ -1164,7 +1698,11 @@ fn run(
                         status = "Save or discard changes before cutting".into();
                     } else {
                         edit.cut_line();
-                        status = "Marked for move; paste with p and save with :w".into();
+                        status = if edit.cut_pending() {
+                            "Cut item; paste with p, then save with :w".into()
+                        } else {
+                            "Cannot cut an unsaved item".into()
+                        };
                     }
                 }
                 ('x', KeyCode::Esc) => {
@@ -1178,7 +1716,10 @@ fn run(
                 ('d', KeyCode::Char('w')) => edit.delete_word(false),
                 ('c', KeyCode::Char('w')) => edit.delete_word(true),
                 ('c', KeyCode::Char('c')) => edit.change_line(),
-                ('y', KeyCode::Char('y')) => edit.yank_line(),
+                ('y', KeyCode::Char('y')) if edit.selected().is_some() => {
+                    edit.yank_line();
+                    status = "Copied item; paste with p, then save with :w".into();
+                }
                 ('r', KeyCode::Char(c)) => edit.replace_char(c),
                 (',', KeyCode::Char(c @ ('a' | 'A' | 'm' | 'M' | 's' | 'S'))) => {
                     let (by, reverse) = match c {
@@ -1209,7 +1750,10 @@ fn run(
                 edit.toggle_mark_current();
                 status.clear();
             }
-            KeyCode::Char('/') => search = Some((String::new(), edit.row, edit.col)),
+            KeyCode::Char('/') => {
+                status.clear();
+                search = Some((String::new(), edit.row, edit.col));
+            }
             KeyCode::Char('n' | 'N') => {
                 if let Some(query) = &last_search {
                     if let Some((row, col)) = search_match(
@@ -1234,8 +1778,14 @@ fn run(
             KeyCode::Char('?') => {
                 help_open = true;
                 help_scroll = 0;
+                help_selected = first_help_binding(&help_rows(""));
+                help_query.clear();
+                help_search_active = false;
             }
-            KeyCode::Char(':') => command = Some(String::new()),
+            KeyCode::Char(':') => {
+                status.clear();
+                command = Some(String::new());
+            }
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => edit.redo(),
             KeyCode::Char('g' | 'd' | 'c' | 'y' | 'r' | 'x' | ',') => {
                 if key.code == KeyCode::Char('x') {
@@ -1277,7 +1827,16 @@ fn run(
             KeyCode::Char('C') => edit.delete_to_end(true),
             KeyCode::Char('S') => edit.change_line(),
             KeyCode::Char('p') => {
-                entry_flash = EntryFlash::new(edit.paste(browser));
+                let before = edit.selected().map(|row| row.name.clone());
+                let pasted = edit.paste(browser);
+                status = if !pasted.is_empty() {
+                    format!("Pasted {} item(s); save with :w", pasted.len())
+                } else if before != edit.selected().map(|row| row.name.clone()) {
+                    "Pasted into filename; save with :w".into()
+                } else {
+                    "Nothing to paste here".into()
+                };
+                entry_flash = EntryFlash::new(pasted);
             }
             KeyCode::Char('R') => {
                 if edit.dirty {
@@ -1291,6 +1850,8 @@ fn run(
                         &mut original,
                         &mut entry_flash,
                         &mut open_config,
+                        &mut icons,
+                        icons_override,
                     ) {
                         Ok(()) => {
                             if let Some(watcher) = directory_watcher.as_mut() {
@@ -1562,6 +2123,123 @@ fn with_terminal_suspended<T>(
 #[cfg(test)]
 mod search_tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn rendered_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
+    #[test]
+    fn help_filters_bindings_and_retains_matching_sections() {
+        let rows = help_rows("zoxide");
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0], HelpRow::Section("NAVIGATION")));
+        assert!(
+            matches!(rows[1], HelpRow::Binding("z", description) if description.contains("zoxide"))
+        );
+        let section = help_rows("EDITING NAMES");
+        assert!(section.len() > 2);
+        assert!(matches!(section[0], HelpRow::Section("EDITING NAMES")));
+        assert!(help_rows("no-such-command").is_empty());
+    }
+
+    #[test]
+    fn header_abbreviates_only_paths_inside_home() {
+        let home = Path::new("/Users/example");
+        assert_eq!(display_directory_path(home, Some(home)), "~");
+        assert_eq!(
+            display_directory_path(Path::new("/Users/example/Downloads/test"), Some(home)),
+            "~/Downloads/test"
+        );
+        assert_eq!(
+            display_directory_path(Path::new("/Users/example2/Downloads"), Some(home)),
+            "/Users/example2/Downloads"
+        );
+        assert_eq!(display_directory_path(Path::new("/tmp"), None), "/tmp");
+    }
+
+    #[test]
+    fn command_line_icon_choice_overrides_toml_setting() {
+        assert!(effective_icons(None, true));
+        assert!(!effective_icons(None, false));
+        assert!(effective_icons(Some(Icons::Always), false));
+        assert!(!effective_icons(Some(Icons::Never), true));
+    }
+
+    #[test]
+    fn footer_and_help_fit_terminal_layout() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("sample.txt"), "hello").unwrap();
+        let browser = Browser::new(root.path().to_path_buf()).unwrap();
+        let mut edit = Buffer::from_browser(&browser);
+        edit.mode = Mode::VisualLine;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_footer(
+                    frame,
+                    Rect::new(0, area.height - 1, area.width, 1),
+                    &browser,
+                    &edit,
+                );
+                let rows = help_rows("zoxide");
+                render_help(frame, area, &rows, "zoxide", true, 1, 0);
+            })
+            .unwrap();
+        let footer = rendered_row(&terminal, 23);
+        assert!(footer.contains("VISUAL LINE"));
+        assert!(footer.contains("5B"));
+        assert!(footer.contains("sample.txt"));
+        assert!(footer.contains("name A–Z"));
+        assert!(footer.contains("1/1"));
+        assert!(rendered_row(&terminal, 4).contains("zoxide"));
+        assert!(rendered_row(&terminal, 7).contains("zoxide"));
+    }
+
+    #[test]
+    fn footer_shows_progress_and_uses_terminal_default_inverse_colors() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            fs::write(root.path().join(name), "hello").unwrap();
+        }
+        let mut browser = Browser::new(root.path().to_path_buf()).unwrap();
+        browser
+            .set_sort(SortSpec {
+                by: SortBy::Mtime,
+                reverse: true,
+                directories_first: true,
+            })
+            .unwrap();
+        let mut edit = Buffer::from_browser(&browser);
+        let mut terminal = Terminal::new(TestBackend::new(80, 4)).unwrap();
+        for (row, expected) in [(0, "Top 0%"), (1, "50%"), (2, "Bot 100%")] {
+            edit.row = row;
+            terminal
+                .draw(|frame| {
+                    render_footer(frame, Rect::new(0, 3, 80, 1), &browser, &edit);
+                })
+                .unwrap();
+            let footer = rendered_row(&terminal, 3);
+            assert!(footer.contains(expected), "{footer:?}");
+            assert!(footer.contains("newest first"), "{footer:?}");
+            assert!(footer.contains("newest first   -"), "{footer:?}");
+            let buffer = terminal.backend().buffer();
+            let size_cell = &buffer[(9, 3)];
+            assert_eq!((size_cell.fg, size_cell.bg), (Color::Reset, Color::Reset));
+            assert!(size_cell.modifier.contains(Modifier::REVERSED));
+            let percentage_x = footer.find(expected).unwrap() as u16 + 1;
+            let percentage_cell = &buffer[(percentage_x, 3)];
+            assert_eq!(
+                (percentage_cell.fg, percentage_cell.bg),
+                (Color::Reset, Color::Reset)
+            );
+            assert!(percentage_cell.modifier.contains(Modifier::REVERSED));
+        }
+    }
     #[test]
     fn external_reload_keeps_cursor_and_highlights_new_entry() {
         let root = tempfile::tempdir().unwrap();
