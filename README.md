@@ -17,6 +17,29 @@ install -m 755 target/release/salt "$HOME/.local/bin/salt"
 
 Make sure `~/.local/bin` is on your `PATH`, then start Salt in the current directory with `salt`. Pass a directory to start elsewhere: `salt ~/Downloads`. The path argument must be a directory.
 
+### Return to the last directory
+
+A program cannot change its parent shell's working directory. To make `salt` leave your zsh shell in the last directory you visited, add this function to `~/.zshrc`:
+
+```zsh
+salt() {
+  local cwd_file final_dir result
+  cwd_file=$(mktemp "${TMPDIR:-/tmp}/salt-cwd.XXXXXX") || return
+  command salt --cwd-file "$cwd_file" "$@"
+  result=$?
+  if (( result == 0 )); then
+    IFS= read -r -d '' final_dir < "$cwd_file"
+    if [[ -n $final_dir && -d $final_dir ]]; then
+      builtin cd -- "$final_dir" || result=$?
+    fi
+  fi
+  rm -f -- "$cwd_file"
+  return "$result"
+}
+```
+
+Restart the shell or source `~/.zshrc`. The `--cwd-file` option writes a NUL-terminated final directory only after Salt exits successfully; the wrapper reads it and changes the shell directory. Calling the binary without the function leaves the shell directory unchanged.
+
 Optional tools:
 
 | Tool | Used for |
@@ -45,7 +68,9 @@ Press `?` in Salt for the full, scrollable key reference. When you press the fir
 | `L` or `Enter` | Enter a directory or open a file. |
 | `H`, `-`, or `Backspace` | Go to the parent directory. |
 | `g.` | Toggle hidden entries. |
-| `/` | Search names in the current directory; Enter accepts and Esc restores the previous position. |
+| `/` | Search names in the current directory; matching text is highlighted as you type. Enter keeps the highlights; Esc restores the previous position. |
+| `n` / `N` | Jump to the next / previous search match, wrapping around the directory. |
+| `:noh` | Clear search highlighting. |
 | `z` | Choose a visited directory through zoxide and fzf. |
 | `Z` | Find a file or directory below the current directory through fzf. Directories open; files are selected. |
 | `gx` | Choose a configured application for the current file or directory. |
@@ -85,14 +110,14 @@ With Space marks, `d` or `x` removes all marked rows from the buffer, `y` copies
 
 | Keys | Action |
 | --- | --- |
-| `:w` | Apply staged edits. Deletions require confirmation. |
-| `:wq` | Save and quit. |
+| `:w` | Review all staged filesystem changes, then apply with Enter or `y`. |
+| `:wq` | Review and save, then quit. |
 | `q` or `:q` | Quit only when no edits are pending. |
 | `:q!` | Quit without saving staged edits. |
 | `:e!` | Discard staged edits and reload the directory. |
 | `Esc` | Return from insert or visual mode to normal mode. |
 
-Deleting with `dd` is immediate after confirmation. Cutting with `xx` is deferred: if you quit or replace the cut register without pasting, the original entry stays untouched. Salt checks for name collisions before saving and refuses to overwrite unrelated existing paths.
+The `:w` review lists every planned move, creation, copy, and deletion. Scroll it with `j`/`k` and cancel with Esc or `n`; cancelling leaves the buffer intact. A save with no filesystem changes does not open the review. Deleting with `dd` is immediate after its separate confirmation. Cutting with `xx` is deferred: if you quit or replace the cut register without pasting, the original entry stays untouched. Salt checks for name collisions before saving and refuses to overwrite unrelated existing paths.
 
 ## Configuration
 

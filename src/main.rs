@@ -27,7 +27,8 @@ use ratatui::{
 use sort::{SortBy, SortSpec};
 use std::{
     collections::HashSet,
-    env, io,
+    env, fs, io,
+    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::mpsc,
     time::{Duration, Instant},
@@ -50,15 +51,16 @@ impl Icons {
     }
 }
 
-fn args() -> Result<(PathBuf, Icons), String> {
+fn args() -> Result<(PathBuf, Icons, Option<PathBuf>), String> {
     let mut path = None;
+    let mut cwd_file = None;
     let mut icons = Icons::Always;
     let mut iter = env::args_os().skip(1);
     while let Some(arg) = iter.next() {
         let s = arg.to_string_lossy();
         if s == "--help" || s == "-h" {
             println!(
-                "Usage: salt [--icons auto|always|never] [PATH]\nIcons are enabled by default. Use --icons never to disable them. Set SALT_NERD_FONT=1 to enable icons in auto mode."
+                "Usage: salt [--icons auto|always|never] [--cwd-file FILE] [PATH]\nIcons are enabled by default. Use --icons never to disable them. Set SALT_NERD_FONT=1 to enable icons in auto mode. --cwd-file writes the final directory as a NUL-terminated path for a shell wrapper."
             );
             std::process::exit(0);
         } else if s == "--icons" {
@@ -70,6 +72,15 @@ fn args() -> Result<(PathBuf, Icons), String> {
             )?;
         } else if let Some(value) = s.strip_prefix("--icons=") {
             icons = parse_icons(value)?;
+        } else if s == "--cwd-file" {
+            cwd_file = Some(PathBuf::from(
+                iter.next().ok_or("--cwd-file requires a path")?,
+            ));
+        } else if let Some(value) = s.strip_prefix("--cwd-file=") {
+            if value.is_empty() {
+                return Err("--cwd-file requires a path".into());
+            }
+            cwd_file = Some(PathBuf::from(value));
         } else if s.starts_with('-') {
             return Err(format!("Unknown option: {s}"));
         } else if path.replace(PathBuf::from(arg)).is_some() {
@@ -79,6 +90,7 @@ fn args() -> Result<(PathBuf, Icons), String> {
     Ok((
         path.unwrap_or(env::current_dir().map_err(|e| e.to_string())?),
         icons,
+        cwd_file,
     ))
 }
 fn parse_icons(value: &str) -> Result<Icons, String> {
@@ -111,7 +123,9 @@ const HELP_LINES: &[&str] = &[
     "  H / - / Backspace   parent directory",
     "  z                   jump with zoxide and fzf",
     "  Z                   find a local path with fzf",
-    "  /                   search names in this directory",
+    "  /                   live search and highlight all matches",
+    "  n / N               next / previous search match",
+    "  :noh                clear search highlighting",
     "  g.                  toggle hidden entries",
     "  ,a / ,A             sort name A–Z / Z–A",
     "  ,m / ,M             sort oldest / newest first",
@@ -259,7 +273,8 @@ fn apply_sort(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (path, icons) = args().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let (path, icons, cwd_file) =
+        args().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let mut browser = Browser::new(path)?;
     let config = AppConfig::load()?;
     browser.set_sort_config(config.sort)?;
@@ -278,7 +293,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let restore = screen.restore();
     result?;
     restore?;
+    if let Some(file) = cwd_file {
+        write_cwd_file(&file, browser.path())?;
+    }
     Ok(())
+}
+
+fn write_cwd_file(file: &Path, directory: &Path) -> io::Result<()> {
+    let mut bytes = directory.as_os_str().as_bytes().to_vec();
+    bytes.push(0);
+    fs::write(file, bytes)
 }
 
 struct ScreenGuard {
@@ -322,10 +346,12 @@ fn run(
     let mut original = edit.rows.clone();
     let mut command: Option<String> = None;
     let mut search: Option<(String, usize, usize)> = None;
+    let mut last_search: Option<String> = None;
     let mut archive_input: Option<(Vec<PathBuf>, String)> = None;
     let mut marked_g_pending = false;
     let mut status = String::new();
     let mut pending_plan: Option<Plan> = None;
+    let mut plan_scroll = 0usize;
     let mut pending_delete: Option<PathBuf> = None;
     let mut pending_x_since: Option<Instant> = None;
     let mut queued_key: Option<KeyEvent> = None;
@@ -344,6 +370,8 @@ fn run(
                 .split(frame.area());
             frame.render_widget(Paragraph::new(format!("{} · {}", browser.path().display(), browser.sort().label()))
                 .style(Style::default().add_modifier(Modifier::BOLD)), chunks[0]);
+            let highlighted_query = search.as_ref().map(|(query, _, _)| query.as_str())
+                .or(last_search.as_deref()).unwrap_or("");
             let rows: Vec<_> = edit.rows.iter().enumerate().map(|(i, row)| {
                 let suffix = if row.kind == EntryKind::Directory && !row.name.ends_with('/') { "/" } else { "" };
                 let prefix = icon(row.kind, icons.enabled());
@@ -351,13 +379,17 @@ fn run(
                 let marker = if marked { "[x] " } else { "    " };
                 let mut spans = vec![Span::raw(marker), Span::raw(prefix.to_string())];
                 let selection = edit.visual_range(i);
+                let matches = matching_columns(&row.name, highlighted_query);
                 for (col, ch) in row.name.chars().enumerate() {
                     let selected = selection.is_some_and(|(start, end)| col >= start && col < end);
-                    let style = if i == edit.row && col == edit.col {
+                    let mut style = if i == edit.row && col == edit.col {
                         Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
                     } else if selected || marked {
                         Style::default().add_modifier(Modifier::REVERSED)
                     } else { Style::default() };
+                    if matches.get(col).copied().unwrap_or(false) {
+                        style = style.add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
+                    }
                     spans.push(Span::styled(ch.to_string(), style));
                 }
                 if i == edit.row && edit.col >= row.name.chars().count() {
@@ -374,7 +406,13 @@ fn run(
                 else if menu.is_some() { "j/k choose · Enter open · Esc cancel".to_string() }
                 else if let Some((paths, name)) = &archive_input { format!("Compress {} item(s) · name: {} · Enter create · Esc cancel", paths.len(), name) }
                 else if pending_delete.is_some() { "Delete permanently? y yes · n/Esc cancel".to_string() }
-                else if pending_plan.is_some() { "Confirm deletions? y yes · n/Esc cancel".to_string() }
+                else if pending_plan.is_some() {
+                    if frame.area().width < 22 || frame.area().height < 8 {
+                        "Enlarge terminal to review :w · Esc/n cancel".to_string()
+                    } else {
+                        "Review :w · Enter/y apply · Esc/n cancel · j/k scroll".to_string()
+                    }
+                }
                 else if let Some(cmd) = &command { format!(":{cmd}") }
                 else if let Some((query, _, _)) = &search { format!("/{query} · Enter accept · Esc cancel") }
                 else if !status.is_empty() { status.clone() }
@@ -443,16 +481,22 @@ fn run(
             }
             if let Some(plan) = &pending_plan {
                 let area = frame.area();
-                let popup = Rect::new(area.x + area.width / 6, area.y + area.height / 3,
-                    area.width * 2 / 3, 5.min(area.height));
-                frame.render_widget(Clear, popup);
-                let details = plan.renames.iter().map(|(a,b)| format!("{} → {}", a.display(), b.display()))
-                    .chain(plan.creates.iter().map(|(p,_)| format!("create {}", p.display())))
-                    .chain(plan.copies.iter().map(|(a,b)| format!("copy {} → {}", a.display(), b.display())))
-                    .chain(plan.deletes.iter().map(|p| format!("delete {}", p.display())))
-                    .take(3).collect::<Vec<_>>().join("\n");
-                frame.render_widget(Paragraph::new(format!("{}\n{}", plan.summary(), details))
-                    .block(Block::default().title("Confirm :w deletions").borders(Borders::ALL)), popup);
+                let details = plan_preview_lines(plan, browser.path());
+                let width = area.width.saturating_sub(2).min(100);
+                let height = area.height.saturating_sub(2).min(24).min((details.len() + 6) as u16);
+                if width >= 20 && height >= 6 {
+                    let popup = Rect::new(area.x + area.width.saturating_sub(width) / 2,
+                        area.y + area.height.saturating_sub(height) / 2, width, height);
+                    let visible = height.saturating_sub(6) as usize;
+                    let mut lines = vec![Line::raw(plan.summary()), Line::raw("")];
+                    lines.extend(details.iter().skip(plan_scroll).take(visible).map(|line| Line::raw(line.as_str())));
+                    lines.push(Line::raw(""));
+                    lines.push(Line::raw("Enter/y apply · Esc/n cancel · j/k scroll"));
+                    frame.render_widget(Clear, popup);
+                    frame.render_widget(Paragraph::new(lines)
+                        .block(Block::default().title(format!("Review :w · {}/{}", plan_scroll.saturating_add(1).min(details.len()), details.len()))
+                            .borders(Borders::ALL)), popup);
+                }
             }
             if let Some(path) = &pending_delete {
                 let area = frame.area();
@@ -519,6 +563,8 @@ fn run(
                 marked_g_pending = false;
                 edit.clear_marks();
                 pending_delete = None;
+                pending_plan = None;
+                quit_after_save = false;
                 pending_x_since = None;
                 help_open = false;
             }
@@ -556,26 +602,54 @@ fn run(
             }
             continue;
         }
-        if let Some(plan) = pending_plan.take() {
-            if key.code == KeyCode::Char('y') {
-                let selected_name = edit.selected().map(|row| row.name.clone());
-                match plan.apply() {
-                    Ok(()) => {
-                        browser.refresh()?;
-                        if let Some(name) = selected_name {
-                            browser.select_name(&name);
-                        }
-                        edit.load(browser);
-                        original = edit.rows.clone();
-                        status = "Changes saved".into();
-                        if quit_after_save {
-                            break;
-                        }
+        if let Some(plan) = &pending_plan {
+            let details_len = plan_preview_lines(plan, browser.path()).len();
+            let height = terminal
+                .size()?
+                .height
+                .saturating_sub(2)
+                .min(24)
+                .min((details_len + 6) as u16);
+            let visible = height.saturating_sub(6) as usize;
+            let max_scroll = details_len.saturating_sub(visible.max(1));
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y') => {
+                    let size = terminal.size()?;
+                    if size.width < 22 || size.height < 8 {
+                        continue;
                     }
-                    Err(e) => status = format!("Could not save: {e}"),
+                    let plan = pending_plan.take().unwrap();
+                    let selected_name = edit.selected().map(|row| row.name.clone());
+                    match plan.apply() {
+                        Ok(()) => {
+                            browser.refresh()?;
+                            if let Some(name) = selected_name {
+                                browser.select_name(&name);
+                            }
+                            edit.load(browser);
+                            original = edit.rows.clone();
+                            status = "Changes saved".into();
+                            if quit_after_save {
+                                break;
+                            }
+                        }
+                        Err(e) => status = format!("Could not save: {e}"),
+                    }
+                    quit_after_save = false;
                 }
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    pending_plan = None;
+                    quit_after_save = false;
+                    status = "Save cancelled".into();
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    plan_scroll = (plan_scroll + 1).min(max_scroll)
+                }
+                KeyCode::Char('k') | KeyCode::Up => plan_scroll = plan_scroll.saturating_sub(1),
+                KeyCode::PageDown => plan_scroll = (plan_scroll + visible.max(1)).min(max_scroll),
+                KeyCode::PageUp => plan_scroll = plan_scroll.saturating_sub(visible.max(1)),
+                _ => {}
             }
-            quit_after_save = false;
             continue;
         }
         if let Some((path, choices, selected)) = &mut menu {
@@ -643,6 +717,10 @@ fn run(
                             original = edit.rows.clone();
                             status = "Changes discarded".into();
                         }
+                        "noh" | "nohlsearch" => {
+                            last_search = None;
+                            status.clear();
+                        }
                         "w" | "wq" => {
                             quit_after_save = entered == "wq";
                             match edit.plan(browser.path(), &original) {
@@ -653,24 +731,9 @@ fn run(
                                         break;
                                     }
                                 }
-                                Ok(plan) if !plan.deletes.is_empty() => pending_plan = Some(plan),
                                 Ok(plan) => {
-                                    let selected_name = edit.selected().map(|row| row.name.clone());
-                                    match plan.apply() {
-                                        Ok(()) => {
-                                            browser.refresh()?;
-                                            if let Some(name) = selected_name {
-                                                browser.select_name(&name);
-                                            }
-                                            edit.load(browser);
-                                            original = edit.rows.clone();
-                                            status = "Changes saved".into();
-                                            if quit_after_save {
-                                                break;
-                                            }
-                                        }
-                                        Err(e) => status = format!("Could not save: {e}"),
-                                    }
+                                    plan_scroll = 0;
+                                    pending_plan = Some(plan);
                                 }
                                 Err(e) => status = e.to_string(),
                             }
@@ -691,6 +754,9 @@ fn run(
                     search = None;
                 }
                 KeyCode::Enter => {
+                    if !query.is_empty() {
+                        last_search = Some(query.clone());
+                    }
                     search = None;
                     status.clear();
                 }
@@ -700,13 +766,15 @@ fn run(
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => query.push(c),
                 _ => {}
             }
-            if let Some((query, origin_row, _)) = &search {
+            if let Some((query, origin_row, origin_col)) = &search {
                 if query.is_empty() {
                     edit.row = *origin_row;
-                    edit.col = 0;
-                } else if let Some(row) = search_match(&edit.rows, query, *origin_row) {
+                    edit.col = *origin_col;
+                } else if let Some((row, col)) =
+                    search_match(&edit.rows, query, (*origin_row, *origin_col), true)
+                {
                     edit.row = row;
-                    edit.col = 0;
+                    edit.col = col;
                 }
             }
             continue;
@@ -938,6 +1006,22 @@ fn run(
                 status.clear();
             }
             KeyCode::Char('/') => search = Some((String::new(), edit.row, edit.col)),
+            KeyCode::Char('n' | 'N') => {
+                if let Some(query) = &last_search {
+                    if let Some((row, col)) = search_match(
+                        &edit.rows,
+                        query,
+                        (edit.row, edit.col),
+                        key.code == KeyCode::Char('n'),
+                    ) {
+                        edit.row = row;
+                        edit.col = col;
+                        status.clear();
+                    } else {
+                        status = format!("No match for /{query}");
+                    }
+                }
+            }
             KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 edit.start_visual(Mode::VisualBlock)
             }
@@ -1085,11 +1169,90 @@ fn run(
     Ok(())
 }
 
-fn search_match(rows: &[edit::Row], query: &str, origin: usize) -> Option<usize> {
-    let query = query.to_lowercase();
-    (0..rows.len())
-        .map(|offset| (origin + offset + 1) % rows.len())
-        .find(|&index| rows[index].name.to_lowercase().contains(&query))
+fn plan_preview_lines(plan: &Plan, base: &Path) -> Vec<String> {
+    let path = |value: &Path| {
+        value
+            .strip_prefix(base)
+            .unwrap_or(value)
+            .display()
+            .to_string()
+    };
+    plan.renames
+        .iter()
+        .map(|(from, to)| format!("MOVE    {} → {}", path(from), path(to)))
+        .chain(plan.creates.iter().map(|(target, kind)| {
+            let action = if *kind == EntryKind::Directory {
+                "MKDIR"
+            } else {
+                "CREATE"
+            };
+            format!("{action:<7} {}", path(target))
+        }))
+        .chain(
+            plan.copies
+                .iter()
+                .map(|(from, to)| format!("COPY    {} → {}", path(from), path(to))),
+        )
+        .chain(
+            plan.deletes
+                .iter()
+                .map(|target| format!("DELETE  {}", path(target))),
+        )
+        .collect()
+}
+
+fn matching_columns(name: &str, query: &str) -> Vec<bool> {
+    let mut matched = vec![false; name.chars().count()];
+    for (start, end) in matching_spans(name, query) {
+        matched[start..end].fill(true);
+    }
+    matched
+}
+
+fn matching_spans(name: &str, query: &str) -> Vec<(usize, usize)> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let needle: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
+    let folded: Vec<(char, usize)> = name
+        .chars()
+        .enumerate()
+        .flat_map(|(column, ch)| ch.to_lowercase().map(move |lower| (lower, column)))
+        .collect();
+    folded
+        .windows(needle.len())
+        .filter(|window| window.iter().map(|(ch, _)| *ch).eq(needle.iter().copied()))
+        .map(|window| (window.first().unwrap().1, window.last().unwrap().1 + 1))
+        .collect()
+}
+
+fn search_match(
+    rows: &[edit::Row],
+    query: &str,
+    origin: (usize, usize),
+    forward: bool,
+) -> Option<(usize, usize)> {
+    let hits: Vec<_> = rows
+        .iter()
+        .enumerate()
+        .flat_map(|(row, entry)| {
+            matching_spans(&entry.name, query)
+                .into_iter()
+                .map(move |(col, _)| (row, col))
+        })
+        .collect();
+    if forward {
+        hits.iter()
+            .copied()
+            .find(|hit| *hit > origin)
+            .or_else(|| hits.first().copied())
+    } else {
+        hits.iter()
+            .copied()
+            .rev()
+            .find(|hit| *hit < origin)
+            .or_else(|| hits.last().copied())
+    }
 }
 
 fn archive_selection(edit: &Buffer, visual_lines: bool) -> Result<Vec<PathBuf>, String> {
@@ -1179,10 +1342,26 @@ mod search_tests {
             name: name.into(),
             kind: EntryKind::File,
         });
-        assert_eq!(search_match(&rows, "BE", 0), Some(1));
-        assert_eq!(search_match(&rows, "AL", 2), Some(0));
-        assert_eq!(search_match(&rows, "none", 0), None);
-        assert_eq!(search_match(&[], "x", 0), None);
+        assert_eq!(search_match(&rows, "BE", (0, 0), true), Some((1, 0)));
+        assert_eq!(search_match(&rows, "AL", (2, 0), true), Some((0, 0)));
+        assert_eq!(search_match(&rows, "AL", (1, 0), false), Some((0, 0)));
+        assert_eq!(search_match(&rows, "BE", (0, 0), false), Some((1, 0)));
+        assert_eq!(search_match(&rows, "none", (0, 0), true), None);
+        assert_eq!(search_match(&[], "x", (0, 0), true), None);
+        assert_eq!(
+            matching_columns("aBaBa", "BA"),
+            [false, true, true, true, true]
+        );
+        assert_eq!(matching_columns("Café", "FÉ"), [false, false, true, true]);
+        let repeated = [edit::Row {
+            original: None,
+            copy_from: None,
+            name: "banana".into(),
+            kind: EntryKind::File,
+        }];
+        assert_eq!(search_match(&repeated, "an", (0, 0), true), Some((0, 1)));
+        assert_eq!(search_match(&repeated, "an", (0, 1), true), Some((0, 3)));
+        assert_eq!(search_match(&repeated, "an", (0, 1), false), Some((0, 3)));
     }
 
     #[test]
@@ -1236,5 +1415,38 @@ mod search_tests {
             .map(|index| edit.rows[*index].name.as_str())
             .collect();
         assert_eq!(marked, ["gamma", "alpha"]);
+    }
+
+    #[test]
+    fn save_preview_lists_every_planned_operation() {
+        let base = Path::new("/tmp/salt-preview-test");
+        let plan = Plan {
+            renames: vec![(base.join("old"), base.join("new"))],
+            creates: vec![(base.join("folder"), EntryKind::Directory)],
+            copies: vec![(base.join("source"), base.join("copy"))],
+            deletes: vec![base.join("obsolete")],
+        };
+        assert_eq!(
+            plan_preview_lines(&plan, base),
+            [
+                "MOVE    old → new",
+                "MKDIR   folder",
+                "COPY    source → copy",
+                "DELETE  obsolete",
+            ]
+        );
+    }
+
+    #[test]
+    fn cwd_file_is_nul_terminated() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("cwd");
+        write_cwd_file(&file, root.path()).unwrap();
+        let bytes = std::fs::read(file).unwrap();
+        assert_eq!(bytes.last(), Some(&0));
+        assert_eq!(
+            &bytes[..bytes.len() - 1],
+            root.path().as_os_str().as_bytes()
+        );
     }
 }
