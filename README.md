@@ -98,11 +98,13 @@ Press `,` to see the sorting choices. Manual sorting applies to the current dire
 | `Space` | Mark or unmark the current row, then move down. Repeat to select nonadjacent files and directories. |
 | `yy` | Copy the current row into Salt's register. |
 | `xx` | Mark the current entry for a move; the source stays in place until you paste and save. |
-| `p` / `P` | Paste below / above. |
+| `p` | Paste into the current directory's sort order. The cursor moves to the first pasted entry. |
 | `dd` | Ask for confirmation, then permanently delete the current file or directory immediately. |
 | `gc` | Create a `.zip` archive of the current entry. In `V` row selection, archive all selected rows together. |
 
 A new row ending in `/` creates a directory. A name such as `test/test1.txt` creates missing parent directories when saved. A relative name such as `../other/name` moves an entry to another local directory. Save or discard pending edits before navigating, deleting, or compressing.
+
+New entries briefly glow with the terminal accent color after pasting, finishing a new buffer row, saving newly created files or directories, or creating a ZIP. The highlight then returns to the normal row colors.
 
 `gc` prompts for a `.zip` filename. It requires the `zip` program, creates the archive in the current directory, and refuses to overwrite an existing path. Multi-item archives can use contiguous `V` rows or separate Space marks.
 

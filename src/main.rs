@@ -15,7 +15,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use edit::{Buffer, Mode, Plan};
+use edit::{Buffer, Mode, Plan, Row};
 use model::{Browser, EntryKind};
 use open::{Choice, OpenConfig};
 use ratatui::{
@@ -55,6 +55,58 @@ fn search_background() -> Style {
         .fg(Color::Black)
         .bg(SEARCH_HIGHLIGHT)
         .add_modifier(Modifier::BOLD)
+}
+
+/// Briefly highlights rows introduced by a paste or a filesystem operation.
+struct EntryFlash {
+    rows: Vec<Row>,
+    started: Instant,
+}
+
+impl EntryFlash {
+    const DURATION: Duration = Duration::from_millis(700);
+
+    fn new(rows: Vec<Row>) -> Option<Self> {
+        (!rows.is_empty()).then(|| Self {
+            rows,
+            started: Instant::now(),
+        })
+    }
+
+    fn new_buffer_row(edit: &Buffer) -> Option<Self> {
+        Self::new(
+            edit.selected()
+                .filter(|row| {
+                    row.original.is_none() && row.copy_from.is_none() && !row.name.is_empty()
+                })
+                .cloned()
+                .into_iter()
+                .collect(),
+        )
+    }
+
+    fn style(&self, row: &Row) -> Option<Style> {
+        if !self.rows.contains(row) || self.started.elapsed() >= Self::DURATION {
+            return None;
+        }
+        if self.started.elapsed() < Duration::from_millis(350) {
+            Some(accent_background())
+        } else {
+            Some(accent_style())
+        }
+    }
+}
+
+fn newly_visible_rows(edit: &Buffer, previous: &HashSet<PathBuf>) -> Vec<Row> {
+    edit.rows
+        .iter()
+        .filter(|row| {
+            row.original
+                .as_ref()
+                .is_some_and(|path| !previous.contains(path))
+        })
+        .cloned()
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -163,7 +215,7 @@ const HELP_LINES: &[&str] = &[
     "FILES AND REGISTERS",
     "  yy                  copy row to Salt's register",
     "  xx                  mark for move; no paste means no change",
-    "  p / P               paste below / above; :w applies move",
+    "  p                   paste in directory sort order; :w applies move",
     "  dd                  confirm and delete immediately",
     "  gx                  choose a configured opener",
     "  gc                  create .zip (in V: selected rows)",
@@ -370,9 +422,16 @@ fn run(
     let mut help_open = false;
     let mut help_scroll = 0usize;
     let mut quit_after_save = false;
+    let mut entry_flash: Option<EntryFlash> = None;
     let (launch_errors, pending_errors) = mpsc::channel::<String>();
     let mut menu: Option<(PathBuf, Vec<Choice>, usize)> = None;
     loop {
+        if entry_flash
+            .as_ref()
+            .is_some_and(|flash| flash.started.elapsed() >= EntryFlash::DURATION)
+        {
+            entry_flash = None;
+        }
         while let Ok(error) = pending_errors.try_recv() {
             status = error;
         }
@@ -401,10 +460,13 @@ fn run(
                 ];
                 let selection = edit.visual_range(i);
                 let matches = matching_columns(&row.name, highlighted_query);
+                let flash_style = entry_flash.as_ref().and_then(|flash| flash.style(row));
                 for (col, ch) in row.name.chars().enumerate() {
                     let selected = selection.is_some_and(|(start, end)| col >= start && col < end);
                     let style = if i == edit.row && col == edit.col {
                         accent_background()
+                    } else if let Some(style) = flash_style {
+                        style
                     } else if matches.get(col).copied().unwrap_or(false) {
                         search_background()
                     } else if selected || marked {
@@ -584,6 +646,7 @@ fn run(
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if edit.mode == Mode::Insert {
                 edit.leave_insert();
+                entry_flash = EntryFlash::new_buffer_row(&edit);
             } else {
                 edit.pending = None;
                 command = None;
@@ -649,6 +712,11 @@ fn run(
                     }
                     let plan = pending_plan.take().unwrap();
                     let selected_name = edit.selected().map(|row| row.name.clone());
+                    let visible_before: HashSet<_> = browser
+                        .entries()
+                        .iter()
+                        .map(|entry| entry.path.clone())
+                        .collect();
                     match plan.apply() {
                         Ok(()) => {
                             browser.refresh()?;
@@ -657,6 +725,8 @@ fn run(
                             }
                             edit.load(browser);
                             original = edit.rows.clone();
+                            entry_flash =
+                                EntryFlash::new(newly_visible_rows(&edit, &visible_before));
                             status = "Changes saved".into();
                             if quit_after_save {
                                 break;
@@ -712,12 +782,19 @@ fn run(
                     let paths = paths.clone();
                     let name = name.clone();
                     archive_input = None;
+                    let visible_before: HashSet<_> = browser
+                        .entries()
+                        .iter()
+                        .map(|entry| entry.path.clone())
+                        .collect();
                     match archive::create_zip(browser.path(), &paths, &name) {
                         Ok(path) => {
                             browser.refresh()?;
                             browser.select_name(&name);
                             edit.load(browser);
                             original = edit.rows.clone();
+                            entry_flash =
+                                EntryFlash::new(newly_visible_rows(&edit, &visible_before));
                             status = format!("Created: {}", path.display());
                         }
                         Err(e) => status = format!("Could not compress: {e}"),
@@ -812,6 +889,7 @@ fn run(
             match key.code {
                 KeyCode::Esc => {
                     edit.leave_insert();
+                    entry_flash = EntryFlash::new_buffer_row(&edit);
                 }
                 KeyCode::Backspace => edit.backspace(),
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -989,7 +1067,7 @@ fn run(
                         status = "Save or discard changes before cutting".into();
                     } else {
                         edit.cut_line();
-                        status = "Marked for move; paste with p/P and save with :w".into();
+                        status = "Marked for move; paste with p and save with :w".into();
                     }
                 }
                 ('x', KeyCode::Esc) => {
@@ -1101,8 +1179,9 @@ fn run(
             KeyCode::Char('D') => edit.delete_to_end(false),
             KeyCode::Char('C') => edit.delete_to_end(true),
             KeyCode::Char('S') => edit.change_line(),
-            KeyCode::Char('p') => edit.paste(false, browser.path()),
-            KeyCode::Char('P') => edit.paste(true, browser.path()),
+            KeyCode::Char('p') => {
+                entry_flash = EntryFlash::new(edit.paste(browser));
+            }
             KeyCode::Char('u') => edit.undo(),
             KeyCode::Char('q') => {
                 if edit.dirty {

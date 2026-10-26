@@ -1,8 +1,10 @@
-use crate::model::{Browser, EntryKind};
+use crate::model::{Browser, Entry, EntryKind, compare_entries};
 use std::{
     collections::{BTreeSet, HashSet},
+    ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -504,72 +506,87 @@ impl Buffer {
             self.register = None;
         }
     }
-    pub fn paste(&mut self, above: bool, base: &Path) {
+    /// Paste rows into the directory's sort order and return the newly visible rows.
+    pub fn paste(&mut self, browser: &Browser) -> Vec<Row> {
         let Some(register) = self.register.clone() else {
-            return;
+            return Vec::new();
         };
         if let Register::Text(text) = &register {
             if self.selected().is_some() && !text.contains('\n') {
                 self.snapshot();
                 let name = &mut self.rows[self.row].name;
-                let at = (self.col + usize::from(!above)).min(name.chars().count());
+                let at = (self.col + 1).min(name.chars().count());
                 name.insert_str(byte_index(name, at), text);
                 self.col = at + text.chars().count().saturating_sub(1);
             }
-            return;
+            return Vec::new();
         }
-        if let Register::Rows(rows, cut) = &register {
-            if rows.is_empty() {
-                return;
-            }
-            self.snapshot();
-            let pos = if above {
-                self.row
-            } else {
-                (self.row + 1).min(self.rows.len())
-            };
-            for (offset, source) in rows.iter().enumerate() {
-                let mut row = source.clone();
-                if !cut {
-                    row.copy_from = row.original.take().or(row.copy_from);
-                }
-                self.rows.insert(pos + offset, row);
-            }
-            if *cut {
-                self.register = None;
-            }
-            self.row = pos;
-            self.col = 0;
-            return;
-        }
-        let (mut row, cut) = match register {
-            Register::Copy(row) => (row, false),
-            Register::Cut(row) => (row, true),
+        let (mut pasted, cut) = match register {
+            Register::Copy(row) => (vec![row], false),
+            Register::Cut(row) => (vec![row], true),
+            Register::Rows(rows, cut) => (rows, cut),
             _ => unreachable!(),
         };
-        if cut
-            && row
-                .original
-                .as_ref()
-                .is_some_and(|path| path.parent() == Some(base))
+        if pasted.is_empty()
+            || (cut
+                && pasted.len() == 1
+                && pasted[0]
+                    .original
+                    .as_ref()
+                    .is_some_and(|path| path.parent() == Some(browser.path())))
         {
-            self.register = None;
-            return;
+            if cut {
+                self.register = None;
+            }
+            return Vec::new();
         }
         self.snapshot();
         if cut {
             self.register = None;
         } else {
-            row.copy_from = row.original.take().or(row.copy_from);
+            for row in &mut pasted {
+                row.copy_from = row.original.take().or(row.copy_from.take());
+            }
         }
-        let pos = if above {
-            self.row
-        } else {
-            (self.row + 1).min(self.rows.len())
-        };
-        self.rows.insert(pos, row);
-        self.row = pos;
+        let pasted_start = self.rows.len();
+        self.rows.extend(pasted.iter().cloned());
+        let now = SystemTime::now();
+        let mut sorted: Vec<_> = self
+            .rows
+            .drain(..)
+            .enumerate()
+            .map(|(index, row)| {
+                let source = row
+                    .original
+                    .as_ref()
+                    .or(row.copy_from.as_ref())
+                    .cloned()
+                    .unwrap_or_else(|| browser.path().join(&row.name));
+                let metadata = fs::symlink_metadata(&source).ok();
+                let entry = Entry {
+                    name: OsString::from(&row.name),
+                    path: source,
+                    kind: row.kind,
+                    modified: if index >= pasted_start && row.copy_from.is_some() {
+                        Some(now)
+                    } else {
+                        metadata.as_ref().and_then(|info| info.modified().ok())
+                    },
+                    size: metadata
+                        .as_ref()
+                        .and_then(|info| info.is_file().then_some(info.len())),
+                };
+                (row, entry, index >= pasted_start)
+            })
+            .collect();
+        sorted.sort_by(|(_, left, _), (_, right, _)| compare_entries(left, right, browser.sort()));
+        self.row = sorted
+            .iter()
+            .position(|(_, _, is_pasted)| *is_pasted)
+            .unwrap_or(0);
+        self.rows = sorted.into_iter().map(|(row, _, _)| row).collect();
         self.col = 0;
+        pasted
     }
     pub fn undo(&mut self) {
         self.marked.clear();
@@ -1024,7 +1041,7 @@ mod tests {
         let original = Buffer::from_browser(&browser);
         let mut buffer = Buffer::from_browser(&browser);
         buffer.yank_line();
-        buffer.paste(false, browser.path());
+        buffer.paste(&browser);
         buffer.rows[1].name = "dir/nested".into();
         assert!(buffer.plan(browser.path(), &original.rows).is_err());
     }
@@ -1146,7 +1163,7 @@ mod tests {
         let original = Buffer::from_browser(&browser);
         let mut b = Buffer::from_browser(&browser);
         b.yank_line();
-        b.paste(false, browser.path());
+        b.paste(&browser);
         b.rows[1].name = "b".into();
         let plan = b.plan(browser.path(), &original.rows).unwrap();
         plan.apply().unwrap();
@@ -1213,7 +1230,7 @@ mod tests {
         browser.navigate_to(&root.path().join("two")).unwrap();
         b.load(&browser);
         let original = b.rows.clone();
-        b.paste(false, browser.path());
+        b.paste(&browser);
         b.plan(browser.path(), &original).unwrap().apply().unwrap();
         assert_eq!(
             fs::read_to_string(root.path().join("two/a")).unwrap(),
@@ -1259,7 +1276,7 @@ mod tests {
         browser.navigate_to(&root.path().join("to")).unwrap();
         b.load(&browser);
         let original = b.rows.clone();
-        b.paste(false, browser.path());
+        b.paste(&browser);
         assert!(b.dirty);
         assert!(root.path().join("from/a").exists());
         assert!(!root.path().join("to/a").exists());
@@ -1329,7 +1346,7 @@ mod tests {
         browser.navigate_to(&root.path().join("to")).unwrap();
         buffer.load(&browser);
         let original = buffer.rows.clone();
-        buffer.paste(false, browser.path());
+        buffer.paste(&browser);
         assert_eq!(
             buffer.plan(browser.path(), &original).unwrap().copies.len(),
             2
@@ -1342,5 +1359,100 @@ mod tests {
         assert_eq!(fs::read_to_string(root.path().join("to/a")).unwrap(), "a");
         assert_eq!(fs::read_to_string(root.path().join("to/c")).unwrap(), "c");
         assert!(!root.path().join("to/b").exists());
+    }
+
+    #[test]
+    fn pasted_rows_follow_directory_sort_and_select_first_visible_copy() {
+        use crate::sort::{SortBy, SortSpec};
+
+        let root = tempfile::tempdir().unwrap();
+        let from = root.path().join("from");
+        let to = root.path().join("to");
+        fs::create_dir(&from).unwrap();
+        fs::create_dir(&to).unwrap();
+        for name in ["b", "z"] {
+            fs::write(from.join(name), name).unwrap();
+        }
+        for name in ["a", "m"] {
+            fs::write(to.join(name), name).unwrap();
+        }
+        let mut browser = Browser::new(from).unwrap();
+        let mut buffer = Buffer::from_browser(&browser);
+        buffer.rows_operator(&[0, 1], 'y');
+        browser.navigate_to(&to).unwrap();
+        buffer.load(&browser);
+        let pasted = buffer.paste(&browser);
+        assert_eq!(
+            pasted
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "z"]
+        );
+        assert_eq!(
+            buffer
+                .rows
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "m", "z"]
+        );
+        assert_eq!(buffer.selected().unwrap().name, "b");
+
+        buffer.undo();
+        browser
+            .set_sort(SortSpec {
+                by: SortBy::Name,
+                reverse: true,
+                directories_first: true,
+            })
+            .unwrap();
+        buffer.load(&browser);
+        buffer.paste(&browser);
+        assert_eq!(
+            buffer
+                .rows
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            ["z", "m", "b", "a"]
+        );
+        assert_eq!(buffer.selected().unwrap().name, "z");
+    }
+
+    #[test]
+    fn pasted_file_uses_file_size_sort() {
+        use crate::sort::{SortBy, SortSpec};
+
+        let root = tempfile::tempdir().unwrap();
+        let from = root.path().join("from");
+        let to = root.path().join("to");
+        fs::create_dir(&from).unwrap();
+        fs::create_dir(&to).unwrap();
+        fs::write(from.join("medium"), [0; 5]).unwrap();
+        fs::write(to.join("large"), [0; 10]).unwrap();
+        fs::write(to.join("small"), [0; 1]).unwrap();
+        let mut browser = Browser::new(from).unwrap();
+        let mut buffer = Buffer::from_browser(&browser);
+        buffer.yank_line();
+        browser.navigate_to(&to).unwrap();
+        browser
+            .set_sort(SortSpec {
+                by: SortBy::Size,
+                reverse: true,
+                directories_first: false,
+            })
+            .unwrap();
+        buffer.load(&browser);
+        buffer.paste(&browser);
+        assert_eq!(
+            buffer
+                .rows
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            ["large", "medium", "small"]
+        );
+        assert_eq!(buffer.selected().unwrap().name, "medium");
     }
 }

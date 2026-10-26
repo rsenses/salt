@@ -225,7 +225,7 @@ impl Browser {
     }
 }
 
-fn compare_entries(a: &Entry, b: &Entry, spec: SortSpec) -> Ordering {
+pub(crate) fn compare_entries(a: &Entry, b: &Entry, spec: SortSpec) -> Ordering {
     let directories = if spec.directories_first {
         (a.kind != EntryKind::Directory).cmp(&(b.kind != EntryKind::Directory))
     } else {
