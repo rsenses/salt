@@ -427,6 +427,36 @@ impl Buffer {
         }
         self.col = i;
     }
+    pub fn delete_word_end(&mut self, insert: bool) {
+        let Some(row) = self.selected() else {
+            return;
+        };
+        let chars: Vec<char> = row.name.chars().collect();
+        let start = self.col;
+        if start >= chars.len() {
+            return;
+        }
+        let mut end = start;
+        while end < chars.len() && chars[end].is_whitespace() {
+            end += 1;
+        }
+        if end < chars.len() {
+            let class = word(chars[end]);
+            while end < chars.len() && word(chars[end]) == class {
+                end += 1;
+            }
+        }
+        self.snapshot();
+        let row = &mut self.rows[self.row];
+        let a = byte_index(&row.name, start);
+        let b = byte_index(&row.name, end);
+        row.name.replace_range(a..b, "");
+        if insert {
+            self.mode = Mode::Insert;
+        } else {
+            self.clamp();
+        }
+    }
     pub fn delete_word(&mut self, insert: bool) {
         if self.selected().is_none() {
             return;
@@ -1045,6 +1075,55 @@ mod tests {
             fs::read_to_string(root.path().join("new.txt")).unwrap(),
             "important"
         );
+    }
+    #[test]
+    fn change_word_end_preserves_extension_spaces_and_insert_position() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("café notes.txt"), "").unwrap();
+        let browser = Browser::new(root.path().to_path_buf()).unwrap();
+        let mut buffer = Buffer::from_browser(&browser);
+        buffer.col = 2;
+        buffer.delete_word_end(true);
+        assert_eq!(buffer.rows[0].name, "ca notes.txt");
+        assert_eq!(buffer.mode, Mode::Insert);
+        buffer.insert('X');
+        assert_eq!(buffer.rows[0].name, "caX notes.txt");
+        buffer.undo();
+        buffer.undo();
+        assert_eq!(buffer.rows[0].name, "café notes.txt");
+
+        buffer.col = 11;
+        buffer.delete_word_end(true);
+        buffer.insert('X');
+        assert_eq!(buffer.rows[0].name, "café notes.X");
+    }
+    #[test]
+    fn change_word_end_from_whitespace_and_empty_row() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("a  b.txt"), "").unwrap();
+        let browser = Browser::new(root.path().to_path_buf()).unwrap();
+        let mut buffer = Buffer::from_browser(&browser);
+        buffer.col = 1;
+        buffer.delete_word_end(true);
+        assert_eq!(buffer.rows[0].name, "a.txt");
+        buffer.open_line(false);
+        buffer.leave_insert();
+        buffer.delete_word_end(true);
+        assert_eq!(buffer.rows[1].name, "");
+        assert_eq!(buffer.mode, Mode::Normal);
+    }
+    #[test]
+    fn delete_word_end_keeps_normal_mode_and_following_text() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("café notes.txt"), "").unwrap();
+        let browser = Browser::new(root.path().to_path_buf()).unwrap();
+        let mut buffer = Buffer::from_browser(&browser);
+        buffer.col = 2;
+        buffer.delete_word_end(false);
+        assert_eq!(buffer.rows[0].name, "ca notes.txt");
+        assert_eq!(buffer.mode, Mode::Normal);
+        buffer.undo();
+        assert_eq!(buffer.rows[0].name, "café notes.txt");
     }
     #[test]
     fn delete_word_on_empty_new_row_is_safe() {

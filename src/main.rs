@@ -318,7 +318,8 @@ const HELP_LINES: &[&str] = &[
     "  x / X               delete current / previous character",
     "  s / r               substitute / replace character",
     "  C / D               change / delete to end of name",
-    "  cc / cw / dw        change row / word; delete word",
+    "  cc / cw / ce        change row / word / to word end",
+    "  dw / de             delete word / to word end",
     "  u / Ctrl+r          undo / redo buffer edits",
     "  v / V / Ctrl+v      select characters / rows / block",
     "  Space               mark separate rows; Space again unmarks",
@@ -1748,6 +1749,8 @@ fn run(
                 }
                 ('d', KeyCode::Char('w')) => edit.delete_word(false),
                 ('c', KeyCode::Char('w')) => edit.delete_word(true),
+                ('c', KeyCode::Char('e')) => edit.delete_word_end(true),
+                ('d', KeyCode::Char('e')) => edit.delete_word_end(false),
                 ('c', KeyCode::Char('c')) => edit.change_line(),
                 ('y', KeyCode::Char('y')) if edit.selected().is_some() => {
                     edit.yank_line();

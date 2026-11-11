@@ -125,7 +125,8 @@ Press `,` to see the sorting choices. Manual sorting applies to the current dire
 | `o` / `O` | Add a new row below / above. |
 | `x` / `X` | Delete current / previous character. A lone `x` acts after a short sequence timeout. |
 | `s` / `r`, `C` / `D` | Substitute / replace a character, or change / delete to end of name. |
-| `cc` / `cw` / `dw` | Change a row / word, or delete a word. |
+| `cc` / `cw` / `ce` | Change a row / word, or change to the end of a word. |
+| `dw` / `de` | Delete a word, or delete to the end of a word. |
 | `u` / `Ctrl+r` | Undo / redo edits in the directory buffer. |
 | `v` / `V` / `Ctrl+v` | Select characters / whole rows / a rectangular block. `d`, `c`, and `y` act on the selection. |
 | `Space` | Mark or unmark the current row, then move down. Repeat to select nonadjacent files and directories. |
