@@ -103,7 +103,7 @@ Search input, `:` commands, and notices appear in a reversed-color bar at the bo
 | `R` | Reload Salt's configuration and the current directory. Pending edits and marks are kept safe; clear or save them first. |
 | `/` | Search names in the current directory; matching text is highlighted as you type. Enter keeps the highlights; Esc restores the previous position. |
 | `n` / `N` | Jump to the next / previous search match, wrapping around the directory. |
-| `:noh` | Clear search highlighting. |
+| `Esc` / `:noh` | Clear search highlighting in normal mode (also clears the query used by `n` / `N`). |
 | `z` | Choose a visited directory through zoxide and fzf. |
 | `Z` | Find a file or directory below the current directory through fzf. Directories open; files are selected. |
 | `gx` | Choose a configured application for the current file or directory. |
@@ -206,7 +206,7 @@ Valid `by` values are `name`, `mtime`, and `size`. `reverse` defaults to `false`
 
 ## Development and scope
 
-Run `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked`, and `cargo build --release --locked` before publishing changes. Tests that create ZIP archives require `zip` on `PATH`.
+Run `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked`, and `cargo build --release --locked` before publishing changes. Tests that create ZIP archives require `zip` on `PATH`. For the search/Esc terminal regression tests on macOS or Linux, run `cargo build --locked && python3 -m unittest discover -s tests` (requires Python 3).
 
 See [Architecture](docs/architecture.md) for the buffer model, filesystem planning, and next structural improvements.
 See [Releasing](docs/releasing.md) for the release checklist and Homebrew tap setup.

@@ -303,7 +303,7 @@ const HELP_LINES: &[&str] = &[
     "  Z                   find a local path with fzf",
     "  /                   live search and highlight all matches",
     "  n / N               next / previous search match",
-    "  :noh                clear search highlighting",
+    "  Esc / :noh          clear search highlighting",
     "  g.                  toggle hidden entries",
     "  R                   reload config and current directory",
     "  ,a / ,A             sort name A–Z / Z–A",
@@ -1494,6 +1494,7 @@ fn run(
                     edit.row = *origin_row;
                     edit.col = *origin_col;
                     search = None;
+                    last_search = None;
                 }
                 KeyCode::Enter => {
                     if !query.is_empty() {
@@ -1782,6 +1783,10 @@ fn run(
             continue;
         }
         match key.code {
+            KeyCode::Esc => {
+                last_search = None;
+                status.clear();
+            }
             KeyCode::Char(' ') => {
                 edit.toggle_mark_current();
                 status.clear();
