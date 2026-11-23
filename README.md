@@ -142,7 +142,7 @@ New entries briefly glow with ANSI yellow (color 3) after pasting, finishing a n
 
 `gc` prompts for a `.zip` filename. It requires the `zip` program, creates the archive in the current directory, and refuses to overwrite an existing path. Multi-item archives can use contiguous `V` rows or separate Space marks.
 
-With Space marks, `d` removes marked rows from the buffer, `x` marks them for a deferred move, `y` copies them to Salt's register, and `gc` compresses them into one ZIP. A cut without a later paste leaves the source files untouched. Marked names use the accent background; the selection panel shows the count. Removal takes effect on disk only after `:w` and its deletion confirmation. `c` or `s` changes one marked row; changing several complete rows is not supported yet. `Esc` clears all marks. Marks are cleared when the buffer changes or the directory is reloaded, but are preserved when you change the sort order.
+With Space marks, `d` asks for confirmation and permanently deletes marked files and directories immediately on `y` (no `:w` needed); `n` or Esc leaves files and marks unchanged. Pending buffer edits must be saved or discarded first. `x` marks entries for a deferred move, `y` copies them to Salt's register, and `gc` compresses them into one ZIP. A cut without a later paste leaves the source files untouched. Marked names use the accent background; the selection panel shows the count. `c` or `s` changes one marked row; changing several complete rows is not supported yet. `Esc` clears all marks. Marks are cleared when the buffer changes or the directory is reloaded, but are preserved when you change the sort order.
 
 ### Saving and leaving
 

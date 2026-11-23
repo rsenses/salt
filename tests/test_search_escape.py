@@ -13,11 +13,15 @@ import time
 import unittest
 
 
-class SearchEscapeTest(unittest.TestCase):
+class SaltPTYTest(unittest.TestCase):
+    def prepare(self):
+        return {}
+
     def setUp(self):
         self.root = tempfile.TemporaryDirectory()
         self.addCleanup(self.root.cleanup)
         Path(self.root.name, "sample.txt").touch()
+        environment = self.prepare()
         self.master, slave = pty.openpty()
         self.addCleanup(os.close, self.master)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
@@ -29,7 +33,8 @@ class SearchEscapeTest(unittest.TestCase):
             self.process = subprocess.Popen(
                 [str(binary), self.root.name],
                 stdin=slave, stdout=slave, stderr=slave,
-                env={**os.environ, "TERM": "xterm-256color", "HOME": self.root.name},
+                env={**os.environ, "TERM": "xterm-256color", "HOME": self.root.name,
+                     "XDG_CONFIG_HOME": self.root.name, **environment},
             )
         finally:
             os.close(slave)
@@ -57,6 +62,8 @@ class SearchEscapeTest(unittest.TestCase):
         os.write(self.master, keys)
         return self.drain()
 
+
+class SearchEscapeTest(SaltPTYTest):
     def confirm_search(self):
         self.assertIn(b"48;5;2m", self.send(b"/sam"))
         self.send(b"\r")

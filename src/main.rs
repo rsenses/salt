@@ -332,7 +332,7 @@ const HELP_LINES: &[&str] = &[
     "  yy                  copy row to Salt's register",
     "  xx                  mark for move; no paste means no change",
     "  p                   paste in directory sort order; :w applies move",
-    "  dd                  confirm and delete immediately",
+    "  dd / marked d       confirm and delete immediately",
     "  gx                  choose a configured opener",
     "  gc                  create .zip (in V: selected rows)",
     "  with marks: d/x/y    delete / cut / copy selected rows",
@@ -730,7 +730,7 @@ fn marked_hints(multiple_rows: bool) -> &'static [(&'static str, &'static str)] 
     if multiple_rows {
         &[
             ("Space", "mark or unmark current row"),
-            ("d", "delete marked rows"),
+            ("d", "confirm permanent deletion"),
             ("x", "cut marked rows"),
             ("y", "copy marked rows"),
             ("g c", "compress marked rows"),
@@ -739,7 +739,7 @@ fn marked_hints(multiple_rows: bool) -> &'static [(&'static str, &'static str)] 
     } else {
         &[
             ("Space", "mark or unmark current row"),
-            ("d", "delete marked row"),
+            ("d", "confirm permanent deletion"),
             ("x", "cut marked row"),
             ("c / s", "change marked row"),
             ("y", "copy marked row"),
@@ -879,7 +879,8 @@ fn run(
     };
     let mut pending_plan: Option<Plan> = None;
     let mut plan_scroll = 0usize;
-    let mut pending_delete: Option<PathBuf> = None;
+    let mut pending_delete: Option<Vec<PathBuf>> = None;
+    let mut delete_scroll = 0usize;
     let mut pending_x_since: Option<Instant> = None;
     let mut queued_key: Option<KeyEvent> = None;
     let mut help_open = false;
@@ -1135,8 +1136,11 @@ fn run(
                     frame.render_widget(Paragraph::new(lines), body);
                 }
             }
-            if let Some(path) = &pending_delete {
-                let description = path.display().to_string();
+            if let Some(paths) = &pending_delete {
+                let description = format!(
+                    "{} item(s); directories and their contents will be removed.",
+                    paths.len()
+                );
                 let actions = [
                     PopupAction {
                         key: "y",
@@ -1148,15 +1152,21 @@ fn run(
                     },
                 ];
                 let popup = Popup {
-                    title: "Delete permanently?",
+                    title: "Delete permanently? · j/k to scroll · Esc cancels",
                     description: &description,
                     actions: &actions,
                     width: 96,
-                    height: 10,
+                    height: (paths.len() + 7).clamp(10, 24) as u16,
                 };
                 if let Some(body) = popup.render(frame, frame.area()) {
                     frame.render_widget(
-                        Paragraph::new("Directories and their contents will be removed."),
+                        Paragraph::new(
+                            paths
+                                .iter()
+                                .skip(delete_scroll)
+                                .map(|path| Line::raw(path.display().to_string()))
+                                .collect::<Vec<_>>(),
+                        ),
                         body,
                     );
                 }
@@ -1298,27 +1308,49 @@ fn run(
             }
             continue;
         }
-        if let Some(path) = pending_delete.take() {
+        if let Some(paths) = pending_delete.take() {
             match key.code {
                 KeyCode::Char('y') => {
                     let size = terminal.size()?;
                     if !Popup::fits(size.width, size.height) {
-                        pending_delete = Some(path);
+                        pending_delete = Some(paths);
                         continue;
                     }
-                    match edit::delete_disk(&path) {
-                        Ok(()) => {
-                            browser.refresh()?;
-                            edit.forget_deleted(&path);
-                            edit.load(browser);
-                            original = edit.rows.clone();
-                            status = format!("Deleted: {}", path.display());
+                    let mut deleted = 0;
+                    let mut failure = None;
+                    for path in &paths {
+                        match edit::delete_disk(path) {
+                            Ok(()) => {
+                                edit.forget_deleted(path);
+                                deleted += 1;
+                            }
+                            Err(error) => {
+                                failure =
+                                    Some(format!("Could not delete {}: {error}", path.display()));
+                                break;
+                            }
                         }
-                        Err(e) => status = format!("Could not delete: {e}"),
                     }
+                    browser.refresh()?;
+                    edit.load(browser);
+                    original = edit.rows.clone();
+                    status = match failure {
+                        Some(error) => {
+                            format!("Deleted {deleted}/{} item(s). {error}", paths.len())
+                        }
+                        None => format!("Deleted {deleted} item(s)"),
+                    };
                 }
                 KeyCode::Char('n') | KeyCode::Esc => {}
-                _ => pending_delete = Some(path),
+                KeyCode::Char('j') | KeyCode::Down => {
+                    delete_scroll = (delete_scroll + 1).min(paths.len().saturating_sub(1));
+                    pending_delete = Some(paths);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    delete_scroll = delete_scroll.saturating_sub(1);
+                    pending_delete = Some(paths);
+                }
+                _ => pending_delete = Some(paths),
             }
             continue;
         }
@@ -1587,15 +1619,18 @@ fn run(
                             true,
                         ),
                         KeyCode::Char('x') => ("Cannot cut an unsaved item".into(), false),
+                        _ if edit.dirty => {
+                            ("Save or discard changes before deleting".into(), false)
+                        }
                         _ => {
-                            edit.rows_operator(&indices, 'd');
-                            (
-                                format!(
-                                    "Removed {} row(s) from the buffer; use :w to save",
-                                    indices.len()
-                                ),
-                                true,
-                            )
+                            pending_delete = Some(
+                                indices
+                                    .iter()
+                                    .filter_map(|&index| edit.rows[index].original.clone())
+                                    .collect(),
+                            );
+                            delete_scroll = 0;
+                            (String::new(), false)
                         }
                     };
                     status = message;
@@ -1724,7 +1759,11 @@ fn run(
                     if edit.dirty {
                         status = "Save or discard changes before deleting".into();
                     } else {
-                        pending_delete = edit.selected().and_then(|row| row.original.clone());
+                        pending_delete = edit
+                            .selected()
+                            .and_then(|row| row.original.clone())
+                            .map(|path| vec![path]);
+                        delete_scroll = 0;
                     }
                 }
                 ('x', KeyCode::Char('x')) => {
