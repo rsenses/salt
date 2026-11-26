@@ -868,6 +868,7 @@ fn run(
     let mut search: Option<(String, usize, usize)> = None;
     let mut last_search: Option<String> = None;
     let mut archive_input: Option<(Vec<PathBuf>, String)> = None;
+    let mut archive_job: Option<(mpsc::Receiver<io::Result<PathBuf>>, String, Instant)> = None;
     let mut marked_g_pending = false;
     let mut status = String::new();
     let mut directory_watcher = match DirectoryWatcher::new(browser.path()) {
@@ -894,6 +895,34 @@ fn run(
     let (launch_errors, pending_errors) = mpsc::channel::<String>();
     let mut menu: Option<(PathBuf, Vec<Choice>, usize)> = None;
     loop {
+        if let Some((receiver, name, _)) = &archive_job {
+            let result = match receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(io::Error::other(
+                    "Compression worker stopped unexpectedly",
+                ))),
+            };
+            if let Some(result) = result {
+                match result {
+                    Ok(path) => {
+                        let visible_before = browser
+                            .entries()
+                            .iter()
+                            .map(|entry| entry.path.clone())
+                            .collect();
+                        browser.refresh()?;
+                        browser.select_name(name);
+                        edit.load(browser);
+                        original = edit.rows.clone();
+                        entry_flash = EntryFlash::new(newly_visible_rows(&edit, &visible_before));
+                        status = format!("Created: {}", path.display());
+                    }
+                    Err(error) => status = format!("Could not compress: {error}"),
+                }
+                archive_job = None;
+            }
+        }
         if let Some(watcher) = directory_watcher.as_mut() {
             if let Err(error) = watcher.watch(browser.path()) {
                 status = format!("Automatic refresh unavailable ({error}); press R to reload");
@@ -908,6 +937,7 @@ fn run(
                     && command.is_none()
                     && search.is_none()
                     && archive_input.is_none()
+                    && archive_job.is_none()
                     && pending_plan.is_none()
                     && pending_delete.is_none()
                     && menu.is_none()
@@ -935,6 +965,7 @@ fn run(
             let modal_open = help_open
                 || menu.is_some()
                 || archive_input.is_some()
+                || archive_job.is_some()
                 || pending_delete.is_some()
                 || pending_plan.is_some();
             let modal_fits = Popup::fits(frame.area().width, frame.area().height);
@@ -1175,12 +1206,12 @@ fn run(
                 let description = format!("{} selected item(s)", paths.len());
                 let actions = [
                     PopupAction {
-                        key: "Enter",
-                        label: "Create",
+                        key: "y",
+                        label: "Yes",
                     },
                     PopupAction {
-                        key: "Esc",
-                        label: "Cancel",
+                        key: "n",
+                        label: "No",
                     },
                 ];
                 let popup = Popup {
@@ -1191,7 +1222,30 @@ fn run(
                     height: 9,
                 };
                 if let Some(body) = popup.render(frame, frame.area()) {
-                    frame.render_widget(Paragraph::new(format!("Archive name: {name}▏")), body);
+                    frame.render_widget(Paragraph::new(format!("Archive name: {name}")), body);
+                }
+            }
+            if let Some((_, name, started)) = &archive_job {
+                let elapsed = started.elapsed();
+                let spinner = ["|", "/", "-", "\\"][(elapsed.as_millis() / 100 % 4) as usize];
+                let description = format!(
+                    "{spinner} Compressing {name} · {}s elapsed",
+                    elapsed.as_secs()
+                );
+                let popup = Popup {
+                    title: "Creating ZIP archive",
+                    description: &description,
+                    actions: &[],
+                    width: 70,
+                    height: 9,
+                };
+                if let Some(body) = popup.render(frame, frame.area()) {
+                    frame.render_widget(
+                        Paragraph::new(
+                            "Please wait. Actions are disabled until compression finishes.",
+                        ),
+                        body,
+                    );
                 }
             }
             if help_open {
@@ -1226,6 +1280,9 @@ fn run(
             key
         };
         if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        if archive_job.is_some() {
             continue;
         }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1436,13 +1493,13 @@ fn run(
             }
             continue;
         }
-        if let Some((paths, name)) = &mut archive_input {
+        if let Some((paths, name)) = &archive_input {
             match key.code {
-                KeyCode::Esc => archive_input = None,
-                KeyCode::Backspace => {
-                    name.pop();
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    archive_input = None;
+                    status = "Compression cancelled".into();
                 }
-                KeyCode::Enter => {
+                KeyCode::Char('y') => {
                     let size = terminal.size()?;
                     if !Popup::fits(size.width, size.height) {
                         continue;
@@ -1450,25 +1507,18 @@ fn run(
                     let paths = paths.clone();
                     let name = name.clone();
                     archive_input = None;
-                    let visible_before: HashSet<_> = browser
-                        .entries()
-                        .iter()
-                        .map(|entry| entry.path.clone())
-                        .collect();
-                    match archive::create_zip(browser.path(), &paths, &name) {
-                        Ok(path) => {
-                            browser.refresh()?;
-                            browser.select_name(&name);
-                            edit.load(browser);
-                            original = edit.rows.clone();
-                            entry_flash =
-                                EntryFlash::new(newly_visible_rows(&edit, &visible_before));
-                            status = format!("Created: {}", path.display());
-                        }
-                        Err(e) => status = format!("Could not compress: {e}"),
+                    let base = browser.path().to_path_buf();
+                    let (sender, receiver) = mpsc::channel();
+                    let worker_name = name.clone();
+                    match std::thread::Builder::new()
+                        .name("salt-zip".into())
+                        .spawn(move || {
+                            let _ = sender.send(archive::create_zip(&base, &paths, &worker_name));
+                        }) {
+                        Ok(_) => archive_job = Some((receiver, name, Instant::now())),
+                        Err(error) => status = format!("Could not compress: {error}"),
                     }
                 }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => name.push(c),
                 _ => {}
             }
             continue;
